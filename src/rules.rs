@@ -37,6 +37,28 @@ pub struct Antenna {
     pub max_ratio: f64,
 }
 
+/// An enclosure rule: every `inner`-layer shape must sit inside an `outer`-layer
+/// shape with at least `min` DB units of margin on every side (e.g. metal must
+/// enclose a via/cut).
+#[derive(Debug, Clone, Copy)]
+pub struct Enclosure {
+    pub outer: i16,
+    pub inner: i16,
+    pub min: i64,
+}
+
+/// A metal-fill rule (drives the `fill` generator, not the checker): top up
+/// `layer` coverage to at least `target_pct` per square `window`, by tiling
+/// `size`-square fill shapes that keep `gap` clearance from existing geometry.
+#[derive(Debug, Clone, Copy)]
+pub struct Fill {
+    pub layer: i16,
+    pub target_pct: i64,
+    pub window: i64,
+    pub size: i64,
+    pub gap: i64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Rules {
     /// layer → minimum width (DB units).
@@ -52,6 +74,10 @@ pub struct Rules {
     pub connect: Vec<(i16, i16)>,
     /// antenna ratio rules (need connectivity from `connect`).
     pub antenna: Vec<Antenna>,
+    /// enclosure rules (inner must be enclosed by outer with a margin).
+    pub enclosure: Vec<Enclosure>,
+    /// metal-fill rules (consumed by the `fill` generator, not the checker).
+    pub fill: Vec<Fill>,
 }
 
 #[derive(Debug)]
@@ -129,6 +155,35 @@ impl Rules {
                     }
                     r.antenna.push(Antenna { conductor: layer, gate, max_ratio });
                 }
+                "enclosure" | "enc" => {
+                    // `enclosure <outer> <inner> <min>`
+                    let inner: i16 = toks
+                        .get(2)
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| err("enclosure: expected `<outer> <inner> <min>`"))?;
+                    let min: i64 = toks
+                        .get(3)
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| err("enclosure: expected an integer `<min>` (DB units)"))?;
+                    r.enclosure.push(Enclosure { outer: layer, inner, min });
+                }
+                "fill" => {
+                    // `fill <layer> <target_pct> <window> <size> <gap>`
+                    let f = Fill {
+                        layer,
+                        target_pct: arg(0, "fill: expected `<layer> <target%> <window> <size> <gap>`")?,
+                        window: arg(1, "fill: expected `<layer> <target%> <window> <size> <gap>`")?,
+                        size: arg(2, "fill: expected `<layer> <target%> <window> <size> <gap>`")?,
+                        gap: arg(3, "fill: expected `<layer> <target%> <window> <size> <gap>`")?,
+                    };
+                    if f.window <= 0 || f.size <= 0 || f.gap < 0 {
+                        return Err(err("fill: window and size must be > 0, gap ≥ 0"));
+                    }
+                    if f.target_pct < 0 || f.target_pct > 100 {
+                        return Err(err("fill: target% must be in 0..=100"));
+                    }
+                    r.fill.push(f);
+                }
                 other => return Err(err(&format!("unknown rule {other:?}"))),
             }
         }
@@ -137,6 +192,8 @@ impl Rules {
             && r.area.is_empty()
             && r.density.is_empty()
             && r.antenna.is_empty()
+            && r.enclosure.is_empty()
+            && r.fill.is_empty()
         {
             return Err(RulesError("no rules defined".into()));
         }
@@ -180,6 +237,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_enclosure_and_fill() {
+        let r = Rules::parse("enclosure 68 66 40\nfill 68 30 1000 50 60\n").unwrap();
+        assert_eq!(r.enclosure.len(), 1);
+        assert_eq!((r.enclosure[0].outer, r.enclosure[0].inner, r.enclosure[0].min), (68, 66, 40));
+        assert_eq!(r.fill.len(), 1);
+        let f = r.fill[0];
+        assert_eq!((f.layer, f.target_pct, f.window, f.size, f.gap), (68, 30, 1000, 50, 60));
+    }
+
+    #[test]
     fn rejects_garbage() {
         assert!(Rules::parse("width met1 170\n").is_err()); // non-numeric layer
         assert!(Rules::parse("# only comments\n").is_err()); // no rules
@@ -189,5 +256,9 @@ mod tests {
         assert!(Rules::parse("antenna 68 5 0\n").is_err()); // ratio must be > 0
         assert!(Rules::parse("antenna 68 5\n").is_err()); // missing ratio
         assert!(Rules::parse("connect 66\n").is_err()); // connect needs two layers
+        assert!(Rules::parse("enclosure 68 66\n").is_err()); // missing min
+        assert!(Rules::parse("fill 68 30 1000 50\n").is_err()); // missing gap
+        assert!(Rules::parse("fill 68 200 1000 50 60\n").is_err()); // target% > 100
+        assert!(Rules::parse("fill 68 30 0 50 60\n").is_err()); // window 0
     }
 }

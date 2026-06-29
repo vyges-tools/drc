@@ -7,7 +7,7 @@ a list of **violations** out.
 > open standards and plain file formats — and meant to be accessible to everyone,
 > not only teams who can license a six-figure tool. `vyges-drc` opens up DRC.
 
-> **Stability: experimental (v0.1.1).** The width and spacing checks are real and
+> **Stability: experimental (v0.1.2).** The width and spacing checks are real and
 > tested, but this is an early engine — see **Current state** for exactly what is
 > and isn't covered. Treat it as an inner-loop checker, not tape-out sign-off.
 
@@ -40,6 +40,7 @@ cargo build --release            # std-only beyond the vyges-layout kernel
 vyges-drc check block.gds --rules sky130.drc            # -> violations report
 vyges-drc check block.gds --rules sky130.drc --top block --json
 vyges-drc check block.gds --rules sky130.drc --fail-on-violation   # exit 3 (CI gate)
+vyges-drc fill  block.gds --rules sky130.drc -o filled.gds         # metal-fill generator
 vyges-drc demo                                          # built-in layout with violations
 # flags: --rules DECK · --top CELL · -o FILE · --json · --fail-on-violation · -h · -V
 ```
@@ -55,11 +56,16 @@ area       68     20000           # min polygon area (dbu²) on layer 68
 density    68     20 70 100000    # coverage on 68 must be 20–70% per 100000-dbu window
 connect    5      68              # layers 5 & 68 connect where they overlap (via/contact)
 antenna    68     5  400          # per net: layer-68 area ≤ 400 × its layer-5 gate area
+enclosure  68     66 40           # every layer-66 shape enclosed by layer-68 with ≥40 margin
+fill       70     30 100000 600 400   # top layer 70 to 30% per window (600-fill, 400-gap)
 ```
 
-## Current state (v0.1.1)
+The `fill` rule drives the **`fill` generator** (`vyges-drc fill … -o out.gds`), not
+the checker — the checker ignores it.
 
-**Working & tested:** five rule classes —
+## Current state (v0.1.2)
+
+**Working & tested:** six rule classes plus a fill generator —
 
 - **width** — a shape whose smaller dimension is below the layer minimum;
 - **spacing** — two distinct same-layer shapes closer than the minimum (run-length
@@ -73,7 +79,14 @@ antenna    68     5  400          # per net: layer-68 area ≤ 400 × its layer-
   overlap on the same layer, or on a `connect`-declared layer pair), then flag any
   net whose conductor-layer area exceeds `max_ratio ×` its connected gate-layer
   area (process-antenna / plasma-damage protection). The one rule class that needs
-  connectivity, not just per-layer geometry.
+  connectivity, not just per-layer geometry;
+- **enclosure** — every `inner`-layer shape must sit inside an `outer`-layer shape
+  with at least `min` margin on all four sides (e.g. metal must enclose a via);
+  reports the worst margin, or "not enclosed" when no single outer contains it.
+
+Plus the **`fill` generator** (`vyges-drc fill`): for each `fill` rule it tiles every
+window below the target with clearance-respecting fill shapes and writes a **filled
+GDS** — the fix paired with the density *check*.
 
 GDS load + hierarchy **flatten** (via `vyges-layout`), text + `--json` reports, a
 `--fail-on-violation` CI exit code.
@@ -91,7 +104,12 @@ GDS load + hierarchy **flatten** (via `vyges-layout`), text + `--json` reports, 
 - antenna is a **single-conductor-layer ratio** with a simple overlap-based connect
   model — not yet the cumulative per-metal-layer charge model or a diode-discharge
   credit, and a net with conductor but no gate is treated as not-applicable;
-- **enclosure** is the next geometric rule class on the same engine;
+- enclosure takes outer shapes **un-merged**, so an inner enclosed only by the
+  *union* of two abutting outer rects reports as under-enclosed;
+- `fill` tiles the **design bounding box** (include a die/boundary layer for a sparse
+  layout), places fill on the rule's layer at **datatype 0** (a dedicated fill
+  datatype is a follow-up), and reaches the size/gap **geometric ceiling** rather
+  than exceeding it;
 - layers are keyed by **GDS number**; a named-layer mapping is a follow-up.
 
 **Validation roadmap:** correlate against **KLayout / Magic** golden DRC on open

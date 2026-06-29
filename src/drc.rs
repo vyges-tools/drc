@@ -6,8 +6,14 @@
 //! - **area**: a polygon below the layer's minimum area (dbu²);
 //! - **density**: windowed metal coverage outside a `min..max` percent band;
 //!
-//! and per **net** (via union-find connectivity from `connect` rules):
-//! - **antenna**: a net's conductor-layer area exceeds `max_ratio ×` its gate area.
+//! per **net** (via union-find connectivity from `connect` rules):
+//! - **antenna**: a net's conductor-layer area exceeds `max_ratio ×` its gate area;
+//!
+//! cross-layer:
+//! - **enclosure**: an `inner` shape lacks `min` margin inside an `outer` shape.
+//!
+//! Plus a **metal-fill generator** (`fill_library`): tile windows below a density
+//! target with clearance-respecting fill shapes and emit a filled GDS.
 //!
 //! Honest bounds (depth reserved): shapes are taken per input `Boundary` and **not
 //! pre-merged** (a wide wire drawn as abutting rectangles, or two same-net touching
@@ -60,37 +66,43 @@ pub fn spacing(a: &Rect, b: &Rect) -> Option<i64> {
     }
 }
 
+/// Resolve the top cell to operate on (the only cell, or the named one).
+fn pick_top(lib: &Library, top: Option<&str>) -> Result<String, String> {
+    match top {
+        Some(t) => Ok(t.to_string()),
+        None if lib.cells.len() == 1 => Ok(lib.cells[0].name.clone()),
+        None => Err(format!(
+            "{} cells; pass a top cell ({})",
+            lib.cells.len(),
+            lib.cells.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// A measurable element's `(layer, rect)` — a rectangle where possible, else the
+/// bounding box; `None` for elements we don't measure (Path/Text).
+fn elem_rect(e: &Element) -> (i16, Option<Rect>) {
+    match e {
+        Element::Boundary { layer, pts, .. } | Element::Box { layer, pts, .. } => {
+            (*layer, Rect::from_boundary(pts).or_else(|| geom::bbox(pts)))
+        }
+        _ => (0, None),
+    }
+}
+
 /// Run the rule deck over the flattened top cell of `lib`.
 pub fn check_library(
     lib: &Library,
     top: Option<&str>,
     rules: &Rules,
 ) -> Result<Vec<Violation>, String> {
-    let top = match top {
-        Some(t) => t.to_string(),
-        None if lib.cells.len() == 1 => lib.cells[0].name.clone(),
-        None => {
-            return Err(format!(
-                "{} cells; pass a top cell ({})",
-                lib.cells.len(),
-                lib.cells.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
-            ))
-        }
-    };
+    let top = pick_top(lib, top)?;
     let cell = flatten::flatten(lib, &top)?;
 
     // shapes per layer (rectangles where possible; bbox for non-Manhattan)
     let mut by_layer: BTreeMap<i16, Vec<Rect>> = BTreeMap::new();
     for e in &cell.elements {
-        let (layer, rect) = match e {
-            Element::Boundary { layer, pts, .. } => {
-                (*layer, Rect::from_boundary(pts).or_else(|| geom::bbox(pts)))
-            }
-            Element::Box { layer, pts, .. } => {
-                (*layer, Rect::from_boundary(pts).or_else(|| geom::bbox(pts)))
-            }
-            _ => continue, // Path/Text not measured in v0
-        };
+        let (layer, rect) = elem_rect(e);
         if let Some(r) = rect {
             by_layer.entry(layer).or_default().push(r);
         }
@@ -142,6 +154,10 @@ pub fn check_library(
             by_layer.iter().flat_map(|(&l, shapes)| shapes.iter().map(move |r| (l, *r))).collect();
         antenna_violations(&all, &rules.connect, &rules.antenna, &mut viols);
     }
+    // enclosure is cross-layer (inner inside outer)
+    for rule in &rules.enclosure {
+        enclosure_violations(rule, &by_layer, &mut viols);
+    }
     Ok(viols)
 }
 
@@ -183,10 +199,144 @@ fn rect_area(r: &Rect) -> i64 {
     (r.x1 - r.x0) as i64 * (r.y1 - r.y0) as i64
 }
 
+/// Enclosure: every `inner`-layer shape must sit inside an `outer`-layer shape with
+/// at least `min` margin on all four sides. We take the *best* enclosing outer
+/// (largest min-side margin); a `value` of `-1` flags an inner not enclosed by any
+/// single outer shape.
+///
+/// v0 bound (honest): outer shapes are not pre-merged, so an inner enclosed only by
+/// the *union* of two abutting outer rects reports as under-enclosed — same
+/// not-pre-merged caveat as the geometry rules.
+fn enclosure_violations(
+    rule: &crate::rules::Enclosure,
+    by_layer: &BTreeMap<i16, Vec<Rect>>,
+    out: &mut Vec<Violation>,
+) {
+    let Some(inners) = by_layer.get(&rule.inner) else { return };
+    let empty = Vec::new();
+    let outers = by_layer.get(&rule.outer).unwrap_or(&empty);
+    for inner in inners {
+        let mut best: Option<i64> = None;
+        for o in outers {
+            // does `o` fully contain `inner`?
+            if o.x0 <= inner.x0 && o.y0 <= inner.y0 && o.x1 >= inner.x1 && o.y1 >= inner.y1 {
+                let m = (inner.x0 - o.x0)
+                    .min(o.x1 - inner.x1)
+                    .min(inner.y0 - o.y0)
+                    .min(o.y1 - inner.y1) as i64;
+                best = Some(best.map_or(m, |b| b.max(m)));
+            }
+        }
+        match best {
+            Some(m) if m >= rule.min => {}
+            Some(m) => {
+                out.push(Violation { rule: "enclosure", layer: rule.inner, limit: rule.min, value: m, a: *inner, b: None })
+            }
+            None => out.push(Violation {
+                rule: "enclosure",
+                layer: rule.inner,
+                limit: rule.min,
+                value: -1, // not enclosed by any single outer shape
+                a: *inner,
+                b: None,
+            }),
+        }
+    }
+}
+
 /// Two rects are electrically touching if they overlap or abut (`spacing` returns
 /// `None` exactly then).
 fn touch_or_overlap(a: &Rect, b: &Rect) -> bool {
     spacing(a, b).is_none()
+}
+
+/// A fill candidate keeps at least `gap` clearance from `other` (strictly: they are
+/// separated by ≥ `gap`, never overlapping/touching).
+fn keeps_gap(a: &Rect, other: &Rect, gap: i64) -> bool {
+    matches!(spacing(a, other), Some(d) if d >= gap)
+}
+
+/// **Metal-fill generator** (the fix paired with the density *check*): for each fill
+/// rule, tile each `window` that is below `target%` with `size`-square fill shapes
+/// that keep `gap` clearance from existing geometry and from each other, until the
+/// window reaches the target (or its grid is exhausted). Returns the input library
+/// with the fill added to `top`, plus the number of fill shapes placed.
+///
+/// v0 bounds (honest): clearance is brute-force all-pairs (a spatial index is the
+/// scaling pass); fill goes on the rule's layer at datatype 0 (a dedicated fill
+/// datatype is a follow-up); the fill region is the design bounding box.
+pub fn fill_library(lib: &Library, top: Option<&str>, rules: &Rules) -> Result<(Library, usize), String> {
+    let top = pick_top(lib, top)?;
+    let cell = flatten::flatten(lib, &top)?;
+
+    let mut by_layer: BTreeMap<i16, Vec<Rect>> = BTreeMap::new();
+    let mut all: Vec<Rect> = Vec::new();
+    for e in &cell.elements {
+        if let (layer, Some(r)) = elem_rect(e) {
+            by_layer.entry(layer).or_default().push(r);
+            all.push(r);
+        }
+    }
+    let region = match bbox(&all) {
+        Some(b) => b,
+        None => return Ok((lib.clone(), 0)), // empty cell — nothing to fill
+    };
+
+    let mut new_elems: Vec<Element> = Vec::new();
+    for rule in &rules.fill {
+        let empty = Vec::new();
+        let existing = by_layer.get(&rule.layer).unwrap_or(&empty);
+        let placed = fill_region(rule, &region, existing);
+        for r in &placed {
+            new_elems.push(Element::Boundary { layer: rule.layer, datatype: 0, pts: r.as_boundary() });
+        }
+    }
+
+    let n = new_elems.len();
+    let mut out = lib.clone();
+    if let Some(c) = out.cells.iter_mut().find(|c| c.name == top) {
+        c.elements.extend(new_elems);
+    }
+    Ok((out, n))
+}
+
+/// Place fill squares for one rule over `region`, honoring clearance to `existing`.
+fn fill_region(rule: &crate::rules::Fill, region: &Rect, existing: &[Rect]) -> Vec<Rect> {
+    let (size, gap, win) = (rule.size as i32, rule.gap, rule.window as i32);
+    let pitch = size + gap.max(0) as i32;
+    let mut placed: Vec<Rect> = Vec::new();
+
+    let mut wy0 = region.y0;
+    while wy0 < region.y1 {
+        let wy1 = (wy0 + win).min(region.y1);
+        let mut wx0 = region.x0;
+        while wx0 < region.x1 {
+            let wx1 = (wx0 + win).min(region.x1);
+            let window = Rect::new(wx0, wy0, wx1, wy1);
+            let win_area = rect_area(&window);
+            let target_area = rule.target_pct * win_area / 100;
+            let mut covered: i64 = existing.iter().map(|s| overlap_area(s, &window)).sum();
+
+            let mut fy = wy0;
+            while fy + size <= wy1 && covered < target_area {
+                let mut fx = wx0;
+                while fx + size <= wx1 && covered < target_area {
+                    let cand = Rect::new(fx, fy, fx + size, fy + size);
+                    if existing.iter().all(|s| keeps_gap(&cand, s, gap))
+                        && placed.iter().all(|s| keeps_gap(&cand, s, gap))
+                    {
+                        covered += rect_area(&cand);
+                        placed.push(cand);
+                    }
+                    fx += pitch;
+                }
+                fy += pitch;
+            }
+            wx0 = wx1.max(wx0 + 1);
+        }
+        wy0 = wy1.max(wy0 + 1);
+    }
+    placed
 }
 
 /// Minimal union-find for net extraction.
@@ -413,6 +563,58 @@ mod tests {
         ]);
         let rules = Rules::parse("connect 5 68\nantenna 68 5 1\n").unwrap();
         assert!(check_library(&lib, None, &rules).unwrap().is_empty(), "disjoint -> no shared net");
+    }
+
+    #[test]
+    fn enclosure_margin_pass_and_fail() {
+        // outer 68 box 0..200, inner 66 box 50..150 -> 50 margin on every side
+        let lib = lib_with(vec![rect_elem(68, 0, 0, 200, 200), rect_elem(66, 50, 50, 150, 150)]);
+        assert!(check_library(&lib, None, &Rules::parse("enclosure 68 66 40\n").unwrap()).unwrap().is_empty());
+        let v = check_library(&lib, None, &Rules::parse("enclosure 68 66 60\n").unwrap()).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!((v[0].rule, v[0].value, v[0].limit), ("enclosure", 50, 60));
+    }
+
+    #[test]
+    fn enclosure_inner_outside_is_not_enclosed() {
+        // inner sticks out past the outer -> not enclosed by any single outer shape
+        let lib = lib_with(vec![rect_elem(68, 0, 0, 100, 100), rect_elem(66, 80, 80, 160, 160)]);
+        let v = check_library(&lib, None, &Rules::parse("enclosure 68 66 10\n").unwrap()).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].value, -1, "not-enclosed sentinel");
+    }
+
+    #[test]
+    fn fill_raises_coverage_keeping_clearance() {
+        // a die boundary (layer 100, 1000×1000) sets the fill region; one sparse
+        // layer-68 shape near the origin. fill layer 68 to 10%, 50-square, 50 gap.
+        let lib = lib_with(vec![rect_elem(100, 0, 0, 1000, 1000), rect_elem(68, 0, 0, 100, 100)]);
+        let rules = Rules::parse("fill 68 10 1000 50 50\n").unwrap();
+        let (filled, n) = fill_library(&lib, None, &rules).unwrap();
+        assert!(n > 0, "should place fill shapes");
+        assert_eq!(filled.cells[0].elements.len(), lib.cells[0].elements.len() + n);
+
+        let die = Rect::new(0, 0, 1000, 1000);
+        let cov = |l: &Library| -> i64 {
+            flatten::flatten(l, "top")
+                .unwrap()
+                .elements
+                .iter()
+                .filter_map(|e| if elem_rect(e).0 == 68 { elem_rect(e).1 } else { None })
+                .map(|r| overlap_area(&r, &die))
+                .sum()
+        };
+        assert!(cov(&filled) > cov(&lib), "fill increases layer-68 coverage");
+
+        // every fill shape clears the original metal by the gap
+        let orig = Rect::new(0, 0, 100, 100);
+        for e in &filled.cells[0].elements {
+            if let (68, Some(r)) = elem_rect(e) {
+                if r != orig {
+                    assert!(keeps_gap(&r, &orig, 50), "fill {r:?} too close to existing");
+                }
+            }
+        }
     }
 
     #[test]

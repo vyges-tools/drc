@@ -17,12 +17,13 @@ vyges-drc — geometric design-rule check (GDS + rule deck -> violations)
 
 usage:
   vyges-drc check GDS --rules DECK [--top CELL] [-o OUT] [--json] [--fail-on-violation]
+  vyges-drc fill  GDS --rules DECK [--top CELL] -o OUT.gds     # metal-fill generator
   vyges-drc demo  [--json]
 
 flags:
-  --rules DECK          the .drc rule deck (required for `check`)
+  --rules DECK          the .drc rule deck (required for `check` / `fill`)
   --top CELL            top cell to flatten (default: the sole cell)
-  -o FILE               write the report to FILE (default: stdout)
+  -o FILE               write the report (or, for `fill`, the filled GDS) to FILE
   --json                machine-readable JSON instead of text
   --fail-on-violation   exit 3 when any violation is found (CI gate)
   -h, --help · -V, --version
@@ -45,6 +46,9 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
             "density" => format!("{}% coverage > max {}%", v.value, v.limit),
             // antenna: value / limit are centi-ratio (ratio × 100)
             "antenna" => format!("ratio {:.2} > max {:.2}", v.value as f64 / 100.0, v.limit as f64 / 100.0),
+            // enclosure: value < 0 is the "not enclosed at all" sentinel
+            "enclosure" if v.value < 0 => format!("not enclosed (need {} margin)", v.limit),
+            "enclosure" => format!("enclosure {} dbu < min {}", v.value, v.limit),
             // width / space: linear DB units, show µm too
             _ => format!("{} dbu ({:.4} µm) < min {}", v.value, um(v.value), v.limit),
         };
@@ -101,6 +105,47 @@ fn main() {
     let json = args.iter().any(|a| a == "--json");
     let fail_on = args.iter().any(|a| a == "--fail-on-violation");
 
+    // `fill` is a generator (GDS in -> filled GDS out), not a report — handle early.
+    if args[0] == "fill" {
+        let Some(gds) = args.get(1).filter(|a| !a.starts_with('-')) else {
+            eprintln!("error: `fill` needs a GDS path\n{USAGE}");
+            exit(2);
+        };
+        let Some(deck) = opt(&args, "--rules") else {
+            eprintln!("error: `fill` needs --rules DECK\n{USAGE}");
+            exit(2);
+        };
+        let Some(out) = opt(&args, "-o") else {
+            eprintln!("error: `fill` needs -o OUT.gds\n{USAGE}");
+            exit(2);
+        };
+        let lib = Library::load(gds).unwrap_or_else(|e| {
+            eprintln!("error: {gds}: {e}");
+            exit(1);
+        });
+        let rules = Rules::load(&deck).unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            exit(1);
+        });
+        if rules.fill.is_empty() {
+            eprintln!("error: the deck defines no `fill` rules");
+            exit(2);
+        }
+        let (filled, n) = drc::fill_library(&lib, opt(&args, "--top").as_deref(), &rules)
+            .unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                exit(1);
+            });
+        filled.save(&out).unwrap_or_else(|e| {
+            eprintln!("error: {out}: {e}");
+            exit(1);
+        });
+        if !json {
+            eprintln!("vyges-drc fill — added {n} fill shape(s) → {out}");
+        }
+        return;
+    }
+
     let (lib, rules, top) = match args[0].as_str() {
         "check" => {
             let Some(gds) = args.get(1).filter(|a| !a.starts_with('-')) else {
@@ -144,12 +189,15 @@ fn main() {
                         // antenna: a small gate (layer 5) tied to a long metal (layer 74)
                         bnd(5, 0, 700, 10, 710),
                         bnd(74, 0, 700, 1000, 720),
+                        // enclosure: inner (77) only 10 inside its outer (76), min 40
+                        bnd(76, 0, 800, 200, 1000),
+                        bnd(77, 10, 810, 190, 990),
                     ],
                 }],
                 ..Library::default()
             };
             let deck = "width 66 100\nspace 68 100\narea 72 10000\ndensity 70 50 90 1000\n\
-                        connect 5 74\nantenna 74 5 100\n";
+                        connect 5 74\nantenna 74 5 100\nenclosure 76 77 40\n";
             (lib, Rules::parse(deck).unwrap(), None)
         }
         other => {
