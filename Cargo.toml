@@ -1,0 +1,22 @@
+[package]
+name = "vyges-drc"
+version = "0.1.0"
+edition = "2021"
+description = "Design-rule check: a GDS layout + a rule deck in, geometry violations out."
+license = "Apache-2.0"
+authors = ["Vyges <https://vyges.com/contact>"]
+homepage = "https://vyges.com"
+repository = "https://github.com/vyges-tools/drc"
+
+# No third-party deps (builds/tests offline). The GDS / geometry kernel comes from
+# the vyges-layout foundation — the same kernel vyges-lvs rides on.
+[dependencies]
+vyges-layout = { git = "https://github.com/vyges-tools/layout", branch = "main" }
+
+[[bin]]
+name = "vyges-drc"
+path = "src/main.rs"
+
+[lib]
+name = "vyges_drc"
+path = "src/lib.rs"

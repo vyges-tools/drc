@@ -1,0 +1,15 @@
+Vyges Layout-vs-Schematic Engine (vyges-lvs)
+Copyright 2026 Vyges. All Rights Reserved.
+
+This product is authored by Vyges (https://vyges.com) and licensed under the
+Apache License, Version 2.0 (the "License"). You may obtain a copy of the
+License in the accompanying LICENSE file or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+vyges-lvs compares two SPICE netlists (a layout-extracted netlist vs the
+schematic/reference) for structural equivalence — device and net matching by
+name-independent graph refinement — and reports where they diverge.
+
+Per-foundry device-recognition / extraction decks, where applicable, are
+distributed separately under their own terms and are not part of this repository.
