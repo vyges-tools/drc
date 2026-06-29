@@ -6,9 +6,10 @@
 //! the foundry's geometry rules?". Both ride the same clean-room **vyges-layout**
 //! GDS / boolean / flatten kernel — one toolset, one language.
 //!
-//! v0 covers four rule classes — minimum **width**, minimum **spacing**, minimum
-//! **area**, and windowed metal **density** — on flattened Manhattan geometry.
-//! Enclosure / antenna and same-layer pre-merge are the depth passes (see `drc.rs`).
+//! v0 covers five rule classes — minimum **width**, minimum **spacing**, minimum
+//! **area**, windowed metal **density**, and per-net **antenna** ratio (with
+//! union-find connectivity from `connect` rules) — on flattened Manhattan geometry.
+//! Enclosure and same-layer pre-merge are the depth passes (see `drc.rs`).
 //!
 //! Boundary: files in / report out (GDS + `.drc` in; text or `--json` violations
 //! out, with a CI exit code). Pure std beyond the geometry kernel.

@@ -43,12 +43,17 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
             "area" => format!("{} dbu² < min {} dbu²", v.value, v.limit),
             "density" if v.value < v.limit => format!("{}% coverage < min {}%", v.value, v.limit),
             "density" => format!("{}% coverage > max {}%", v.value, v.limit),
+            // antenna: value / limit are centi-ratio (ratio × 100)
+            "antenna" => format!("ratio {:.2} > max {:.2}", v.value as f64 / 100.0, v.limit as f64 / 100.0),
             // width / space: linear DB units, show µm too
             _ => format!("{} dbu ({:.4} µm) < min {}", v.value, um(v.value), v.limit),
         };
         match v.b {
             None if v.rule == "density" => {
                 s.push_str(&format!("  density layer {}: {clause} in window {at}\n", v.layer))
+            }
+            None if v.rule == "antenna" => {
+                s.push_str(&format!("  antenna layer {}: {clause} on net {at}\n", v.layer))
             }
             None => s.push_str(&format!("  {} layer {}: {clause} at {at}\n", v.rule, v.layer)),
             Some(b) => s.push_str(&format!(
@@ -136,11 +141,15 @@ fn main() {
                         bnd(72, 0, 0, 40, 40),
                         bnd(70, 0, 500, 100, 600),
                         bnd(70, 900, 500, 1000, 600),
+                        // antenna: a small gate (layer 5) tied to a long metal (layer 74)
+                        bnd(5, 0, 700, 10, 710),
+                        bnd(74, 0, 700, 1000, 720),
                     ],
                 }],
                 ..Library::default()
             };
-            let deck = "width 66 100\nspace 68 100\narea 72 10000\ndensity 70 50 90 1000\n";
+            let deck = "width 66 100\nspace 68 100\narea 72 10000\ndensity 70 50 90 1000\n\
+                        connect 5 74\nantenna 74 5 100\n";
             (lib, Rules::parse(deck).unwrap(), None)
         }
         other => {

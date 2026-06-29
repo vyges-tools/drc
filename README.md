@@ -7,7 +7,7 @@ a list of **violations** out.
 > open standards and plain file formats — and meant to be accessible to everyone,
 > not only teams who can license a six-figure tool. `vyges-drc` opens up DRC.
 
-> **Stability: experimental (v0.1.0).** The width and spacing checks are real and
+> **Stability: experimental (v0.1.1).** The width and spacing checks are real and
 > tested, but this is an early engine — see **Current state** for exactly what is
 > and isn't covered. Treat it as an inner-loop checker, not tape-out sign-off.
 
@@ -53,11 +53,13 @@ width      66     170             # min width on layer 66
 space      68     140             # min spacing on layer 68
 area       68     20000           # min polygon area (dbu²) on layer 68
 density    68     20 70 100000    # coverage on 68 must be 20–70% per 100000-dbu window
+connect    5      68              # layers 5 & 68 connect where they overlap (via/contact)
+antenna    68     5  400          # per net: layer-68 area ≤ 400 × its layer-5 gate area
 ```
 
-## Current state (v0.1.0)
+## Current state (v0.1.1)
 
-**Working & tested:** four rule classes —
+**Working & tested:** five rule classes —
 
 - **width** — a shape whose smaller dimension is below the layer minimum;
 - **spacing** — two distinct same-layer shapes closer than the minimum (run-length
@@ -66,7 +68,12 @@ density    68     20 70 100000    # coverage on 68 must be 20–70% per 100000-d
 - **area** — a polygon below the layer's minimum area (dbu²);
 - **density** — windowed metal coverage: each `window`-square tile (edge tiles
   clamped to the layer bbox) must stay within a `min..max` percent band, flagging
-  the offending tile and its measured coverage.
+  the offending tile and its measured coverage;
+- **antenna** — a per-**net** check: extract nets (union-find over shapes that
+  overlap on the same layer, or on a `connect`-declared layer pair), then flag any
+  net whose conductor-layer area exceeds `max_ratio ×` its connected gate-layer
+  area (process-antenna / plasma-damage protection). The one rule class that needs
+  connectivity, not just per-layer geometry.
 
 GDS load + hierarchy **flatten** (via `vyges-layout`), text + `--json` reports, a
 `--fail-on-violation` CI exit code.
@@ -79,10 +86,12 @@ GDS load + hierarchy **flatten** (via `vyges-layout`), text + `--json` reports, 
   measures the resulting polygons (this also means density can over-count where
   same-layer shapes overlap);
 - non-Manhattan polygons fall back to their **bounding box**;
-- spacing/density are **brute-force** per layer (a spatial index is the scaling
-  pass, as in `vyges-extract`'s coupling grid);
-- **enclosure** and **antenna** (the latter needs net connectivity) are the next
-  rule classes on the same engine;
+- spacing / density / antenna-connectivity are **brute-force** all-pairs (a spatial
+  index is the scaling pass, as in `vyges-extract`'s coupling grid);
+- antenna is a **single-conductor-layer ratio** with a simple overlap-based connect
+  model — not yet the cumulative per-metal-layer charge model or a diode-discharge
+  credit, and a net with conductor but no gate is treated as not-applicable;
+- **enclosure** is the next geometric rule class on the same engine;
 - layers are keyed by **GDS number**; a named-layer mapping is a follow-up.
 
 **Validation roadmap:** correlate against **KLayout / Magic** golden DRC on open

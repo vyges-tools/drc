@@ -4,7 +4,10 @@
 //! - **width**: a shape whose smaller dimension is below the layer minimum;
 //! - **spacing**: two distinct shapes on the same layer closer than the minimum;
 //! - **area**: a polygon below the layer's minimum area (dbu²);
-//! - **density**: windowed metal coverage outside a `min..max` percent band.
+//! - **density**: windowed metal coverage outside a `min..max` percent band;
+//!
+//! and per **net** (via union-find connectivity from `connect` rules):
+//! - **antenna**: a net's conductor-layer area exceeds `max_ratio ×` its gate area.
 //!
 //! Honest bounds (depth reserved): shapes are taken per input `Boundary` and **not
 //! pre-merged** (a wide wire drawn as abutting rectangles, or two same-net touching
@@ -23,10 +26,10 @@ use crate::rules::Rules;
 
 #[derive(Debug, Clone)]
 pub struct Violation {
-    pub rule: &'static str, // "width" | "space" | "area" | "density"
+    pub rule: &'static str, // "width" | "space" | "area" | "density" | "antenna"
     pub layer: i16,
     /// The bound that was violated. DB units for width/space, DB units² for area,
-    /// **percent** for density (the min or max coverage bound).
+    /// **percent** for density, and **centi-ratio** (ratio × 100) for antenna.
     pub limit: i64,
     /// The measured value, in the same unit as `limit` for that rule.
     pub value: i64,
@@ -133,6 +136,12 @@ pub fn check_library(
             density_violations(layer, shapes, *d, &mut viols);
         }
     }
+    // antenna is a per-net (connectivity) check — needs all layers together
+    if !rules.antenna.is_empty() {
+        let all: Vec<(i16, Rect)> =
+            by_layer.iter().flat_map(|(&l, shapes)| shapes.iter().map(move |r| (l, *r))).collect();
+        antenna_violations(&all, &rules.connect, &rules.antenna, &mut viols);
+    }
     Ok(viols)
 }
 
@@ -166,6 +175,104 @@ fn density_violations(layer: i16, shapes: &[Rect], d: crate::rules::Density, out
             tx0 = tx1.max(tx0 + 1);
         }
         ty0 = ty1.max(ty0 + 1);
+    }
+}
+
+/// Area of a single rect in DB units².
+fn rect_area(r: &Rect) -> i64 {
+    (r.x1 - r.x0) as i64 * (r.y1 - r.y0) as i64
+}
+
+/// Two rects are electrically touching if they overlap or abut (`spacing` returns
+/// `None` exactly then).
+fn touch_or_overlap(a: &Rect, b: &Rect) -> bool {
+    spacing(a, b).is_none()
+}
+
+/// Minimal union-find for net extraction.
+struct UnionFind {
+    parent: Vec<usize>,
+}
+impl UnionFind {
+    fn new(n: usize) -> UnionFind {
+        UnionFind { parent: (0..n).collect() }
+    }
+    fn find(&mut self, mut x: usize) -> usize {
+        while self.parent[x] != x {
+            self.parent[x] = self.parent[self.parent[x]]; // path halving
+            x = self.parent[x];
+        }
+        x
+    }
+    fn union(&mut self, a: usize, b: usize) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            self.parent[ra] = rb;
+        }
+    }
+}
+
+/// Antenna check: extract nets (union-find over shapes that overlap on the same
+/// layer, or on a `connect`-declared layer pair), then for each net flag any
+/// conductor-layer area that exceeds `max_ratio ×` the connected gate-layer area.
+///
+/// v0 bounds (honest): connectivity is brute-force all-pairs overlap (a spatial
+/// index is the scaling pass), the ratio is single-conductor-layer (not the
+/// cumulative per-metal-layer charge model), and a net with conductor but no gate
+/// is treated as not-applicable rather than flagged.
+fn antenna_violations(
+    all: &[(i16, Rect)],
+    connect: &[(i16, i16)],
+    rules: &[crate::rules::Antenna],
+    out: &mut Vec<Violation>,
+) {
+    let n = all.len();
+    let connects = |la: i16, lb: i16| -> bool {
+        la == lb || connect.iter().any(|&(x, y)| (x == la && y == lb) || (x == lb && y == la))
+    };
+    let mut uf = UnionFind::new(n);
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (li, ri) = all[i];
+            let (lj, rj) = all[j];
+            if connects(li, lj) && touch_or_overlap(&ri, &rj) {
+                uf.union(i, j);
+            }
+        }
+    }
+    // group shape indices by net root
+    let mut nets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..n {
+        let root = uf.find(i);
+        nets.entry(root).or_default().push(i);
+    }
+    for idxs in nets.values() {
+        for rule in rules {
+            let gate_area: i64 =
+                idxs.iter().filter(|&&i| all[i].0 == rule.gate).map(|&i| rect_area(&all[i].1)).sum();
+            if gate_area <= 0 {
+                continue; // no gate on this net — antenna ratio is not applicable
+            }
+            let cond: Vec<Rect> =
+                idxs.iter().filter(|&&i| all[i].0 == rule.conductor).map(|&i| all[i].1).collect();
+            let cond_area: i64 = cond.iter().map(rect_area).sum();
+            if cond_area <= 0 {
+                continue;
+            }
+            let ratio = cond_area as f64 / gate_area as f64;
+            if ratio > rule.max_ratio {
+                let net_bbox = bbox(&cond).unwrap_or(all[idxs[0]].1);
+                out.push(Violation {
+                    rule: "antenna",
+                    layer: rule.conductor,
+                    // value / limit carried as centi-ratio (×100) — the report divides.
+                    value: (ratio * 100.0).round() as i64,
+                    limit: (rule.max_ratio * 100.0).round() as i64,
+                    a: net_bbox,
+                    b: None,
+                });
+            }
+        }
     }
 }
 
@@ -265,6 +372,47 @@ mod tests {
         let lib = lib_with(vec![rect_elem(70, 0, 0, 500, 100), rect_elem(70, 1000, 0, 1000, 100)]);
         let rules = Rules::parse("density 70 10 90 1000\n").unwrap();
         assert!(check_library(&lib, None, &rules).unwrap().is_empty());
+    }
+
+    #[test]
+    fn catches_antenna_ratio() {
+        // gate poly (layer 5, area 100) connected to a big metal (layer 68, area
+        // 50000) via `connect 5 68`. ratio 500 > max 100 -> antenna violation.
+        let lib = lib_with(vec![
+            rect_elem(5, 0, 0, 10, 10),       // gate, area 100
+            rect_elem(68, 0, 0, 500, 100),    // conductor, area 50000, overlaps the gate
+        ]);
+        let rules = Rules::parse("connect 5 68\nantenna 68 5 100\n").unwrap();
+        let v = check_library(&lib, None, &rules).unwrap();
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].rule, "antenna");
+        assert_eq!(v[0].layer, 68);
+        assert_eq!(v[0].value, 50000); // centi-ratio: 500.00
+        assert_eq!(v[0].limit, 10000); // centi-ratio: 100.00
+    }
+
+    #[test]
+    fn antenna_under_ratio_passes_and_no_gate_is_skipped() {
+        // (a) within ratio: metal area 4000 / gate 100 = 40 < max 100 -> clean.
+        let ok = lib_with(vec![rect_elem(5, 0, 0, 10, 10), rect_elem(68, 0, 0, 400, 10)]);
+        let rules = Rules::parse("connect 5 68\nantenna 68 5 100\n").unwrap();
+        assert!(check_library(&ok, None, &rules).unwrap().is_empty());
+
+        // (b) conductor but no gate on the net -> antenna not applicable, no flag.
+        let nogate = lib_with(vec![rect_elem(68, 0, 0, 9000, 100)]);
+        assert!(check_library(&nogate, None, &rules).unwrap().is_empty());
+    }
+
+    #[test]
+    fn antenna_needs_connectivity_disconnected_net_is_safe() {
+        // gate and a huge metal that do NOT overlap and have no connect path ->
+        // different nets -> the metal has no gate -> not flagged.
+        let lib = lib_with(vec![
+            rect_elem(5, 0, 0, 10, 10),            // gate near origin
+            rect_elem(68, 5000, 5000, 9000, 6000), // metal far away, disjoint
+        ]);
+        let rules = Rules::parse("connect 5 68\nantenna 68 5 1\n").unwrap();
+        assert!(check_library(&lib, None, &rules).unwrap().is_empty(), "disjoint -> no shared net");
     }
 
     #[test]
