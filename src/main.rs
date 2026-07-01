@@ -13,12 +13,14 @@ use vyges_drc::layout::gds::Library;
 use vyges_drc::rules::Rules;
 
 const USAGE: &str = "\
-vyges-drc — geometric design-rule check (GDS + rule deck -> violations)
+vyges-drc — geometric design-rule check (GDS/OASIS + rule deck -> violations)
 
 usage:
   vyges-drc check GDS --rules DECK [--top CELL] [-o OUT] [--json] [--fail-on-violation]
   vyges-drc fill  GDS --rules DECK [--top CELL] -o OUT.gds     # metal-fill generator
   vyges-drc demo  [--json]
+
+The input layout may be GDSII (.gds) or OASIS (.oas/.oasis) — picked by extension.
 
 flags:
   --rules DECK          the .drc rule deck (required for `check` / `fill`)
@@ -119,7 +121,7 @@ fn main() {
             eprintln!("error: `fill` needs -o OUT.gds\n{USAGE}");
             exit(2);
         };
-        let lib = Library::load(gds).unwrap_or_else(|e| {
+        let lib = Library::load_any(gds).unwrap_or_else(|e| {
             eprintln!("error: {gds}: {e}");
             exit(1);
         });
@@ -156,7 +158,7 @@ fn main() {
                 eprintln!("error: `check` needs --rules DECK\n{USAGE}");
                 exit(2);
             };
-            let lib = Library::load(gds).unwrap_or_else(|e| {
+            let lib = Library::load_any(gds).unwrap_or_else(|e| {
                 eprintln!("error: {gds}: {e}");
                 exit(1);
             });
