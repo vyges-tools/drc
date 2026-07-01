@@ -117,6 +117,50 @@ GDS load + hierarchy **flatten** (via `vyges-layout`), text + `--json` reports, 
 PDKs (sky130, gf180) — the same oracle-backed, golden-corpus discipline the rest
 of Loom uses.
 
+## For researchers — open problems
+
+`vyges-drc` is a clean, std-only, fully open codebase (geometry checks over the shared
+`vyges-layout` / `vyges-geom` kernel) with honest baselines — a good substrate for
+student research. Each item below is a self-contained, publishable direction; the
+engine's file-in/file-out boundary means a new method can be dropped in behind the same
+violation report and measured against the existing baseline. Each names a **code anchor**
+(the file / function that is the natural drop-in point).
+
+1. **Independent validation & differential oracles.** Geometric sign-off is a domain
+   where no single open tool is a definitive reference, so cross-checking against
+   *independent* implementations and self-consistency invariants is itself the validation
+   method. *Open question:* build a reusable **golden-corpus + differential-oracle harness**
+   for geometry checks — independent reference implementations, format-invariance
+   (a check must give the same verdict on a design and its GDS↔OASIS round-trip), and
+   correlation to the established open checkers on open PDKs — that quantifies agreement and
+   surfaces every disagreement. *Start from:* the self-consistency oracles already in the
+   suite — this engine's brute-force-equivalence spacing test (`indexed_spacing_matches_brute_force_at_scale`
+   in `drc.rs`) and `vyges-layout`'s boolean-vs-rasterizer and GDS↔OASIS round-trip tests —
+   and generalize them into a corpus-driven harness.
+2. **Same-layer geometry merging (pre-union).** Shapes are measured **per input boundary,
+   not pre-merged**, so a wide wire drawn as abutting rectangles is measured as drawn.
+   *Open question:* an efficient same-layer **union** pass and measurement on the resulting
+   rectilinear polygons (width/spacing/area/density on merged shapes). *Start from:* the
+   per-layer shape collection in `drc.rs::check_library` and the boolean OR in `vyges-layout`.
+3. **General-angle / non-Manhattan geometry.** Non-rectangular polygons currently fall back
+   to their bounding box. *Open question:* exact width, spacing, and area on rectilinear —
+   and eventually all-angle — polygons. *Start from:* the bbox fallback in `drc.rs::elem_rect`
+   / `polys_on`, and general clipping in `vyges-layout`.
+4. **Cumulative antenna charge model.** The antenna check is a single-conductor-layer area
+   ratio. *Open question:* the cumulative **per-metal-layer charge** model with a
+   diode-discharge credit, still deck-driven and open-PDK-validated. *Start from:*
+   `drc.rs::antenna_violations` and the union-find net extraction beside it.
+5. **Full-block scaling & spatial indexing.** Spacing, antenna-connectivity, and fill
+   clearance ride a uniform-grid spatial index (`vyges-geom::RegionIndex`). *Open question:*
+   characterize on full blocks and study index choice (grid vs. R-tree vs. hierarchical) and
+   parallelism vs. layout density. *Start from:* `RegionIndex` in `vyges-geom` and its call
+   sites in `drc.rs`.
+
+**Working on one of these — or want to?** We're pursuing several ourselves, but the open
+frontier is bigger than any one team, and we'd rather build it in the open than wait. If an
+item here fits your research, a student project, a thesis, or just an itch, we'd genuinely
+like to hear from you — open an issue, send a PR, or reach us at <https://vyges.com/contact>.
+
 ## Open core, certified fab decks
 
 `vyges-drc` is open and contains **no foundry-confidential data**. The rule deck
