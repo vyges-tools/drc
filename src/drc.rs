@@ -15,12 +15,16 @@
 //! Plus a **metal-fill generator** (`fill_library`): tile windows below a density
 //! target with clearance-respecting fill shapes and emit a filled GDS.
 //!
+//! Spacing, antenna connectivity, and fill clearance scale via a `vyges-layout`
+//! **`RegionIndex`** (spatial index): each query returns only nearby shapes, which
+//! are then rechecked with the exact predicate — near-linear, with results identical
+//! to the all-pairs scan.
+//!
 //! Honest bounds (depth reserved): shapes are taken per input `Boundary` and **not
 //! pre-merged** (a wide wire drawn as abutting rectangles, or two same-net touching
 //! shapes, are treated as drawn) — proper DRC unions same-layer geometry first
 //! (a `vyges-layout` boolean OR) and measures the resulting polygons; non-Manhattan
-//! polygons fall back to their bounding box; spacing is brute-force all-pairs per
-//! layer (a spatial index is the scaling pass). Touching/overlapping shapes are
+//! polygons fall back to their bounding box. Touching/overlapping shapes are
 //! treated as connected (not a spacing violation).
 
 use std::collections::BTreeMap;
@@ -28,6 +32,7 @@ use std::collections::BTreeMap;
 use crate::layout::flatten;
 use crate::layout::geom::{self, Rect};
 use crate::layout::gds::{Element, Library};
+use crate::layout::index::RegionIndex;
 use crate::rules::Rules;
 
 #[derive(Debug, Clone)]
@@ -119,8 +124,17 @@ pub fn check_library(
             }
         }
         if let Some(&min_s) = rules.space.get(&layer) {
+            // Only shapes within `min_s` of one another can violate; a RegionIndex
+            // returns those candidates so this is near-linear instead of all-pairs.
+            // Each candidate is rechecked with the exact `spacing`, and `j > i` keeps
+            // every unordered pair reported once — identical results to all-pairs.
+            let idx = RegionIndex::build(shapes);
             for i in 0..shapes.len() {
-                for j in (i + 1)..shapes.len() {
+                for jd in idx.within(&shapes[i], min_s as i32, Some(i as u32)) {
+                    let j = jd as usize;
+                    if j <= i {
+                        continue;
+                    }
                     if let Some(s) = spacing(&shapes[i], &shapes[j]) {
                         if s < min_s {
                             viols.push(Violation {
@@ -262,9 +276,10 @@ fn keeps_gap(a: &Rect, other: &Rect, gap: i64) -> bool {
 /// window reaches the target (or its grid is exhausted). Returns the input library
 /// with the fill added to `top`, plus the number of fill shapes placed.
 ///
-/// v0 bounds (honest): clearance is brute-force all-pairs (a spatial index is the
-/// scaling pass); fill goes on the rule's layer at datatype 0 (a dedicated fill
-/// datatype is a follow-up); the fill region is the design bounding box.
+/// v0 bounds (honest): clearance to existing geometry uses a `RegionIndex` (rechecked
+/// exactly); clearance to already-placed fill stays a linear scan (a live index is
+/// depth); fill goes on the rule's layer at datatype 0 (a dedicated fill datatype is a
+/// follow-up); the fill region is the design bounding box.
 pub fn fill_library(lib: &Library, top: Option<&str>, rules: &Rules) -> Result<(Library, usize), String> {
     let top = pick_top(lib, top)?;
     let cell = flatten::flatten(lib, &top)?;
@@ -305,6 +320,10 @@ fn fill_region(rule: &crate::rules::Fill, region: &Rect, existing: &[Rect]) -> V
     let (size, gap, win) = (rule.size as i32, rule.gap, rule.window as i32);
     let pitch = size + gap.max(0) as i32;
     let mut placed: Vec<Rect> = Vec::new();
+    // Index the static existing geometry so each candidate's clearance test touches
+    // only nearby shapes (rechecked with the exact `keeps_gap`) rather than all of
+    // them. `placed` grows as we go, so it stays a linear scan (a live index is depth).
+    let existing_idx = RegionIndex::build(existing);
 
     let mut wy0 = region.y0;
     while wy0 < region.y1 {
@@ -322,9 +341,13 @@ fn fill_region(rule: &crate::rules::Fill, region: &Rect, existing: &[Rect]) -> V
                 let mut fx = wx0;
                 while fx + size <= wx1 && covered < target_area {
                     let cand = Rect::new(fx, fy, fx + size, fy + size);
-                    if existing.iter().all(|s| keeps_gap(&cand, s, gap))
-                        && placed.iter().all(|s| keeps_gap(&cand, s, gap))
-                    {
+                    // halo ≥ 1 so an abutting shape (gap 0, zero-area overlap) is still
+                    // a candidate; keeps_gap then makes the exact accept/reject call.
+                    let clears_existing = existing_idx
+                        .within(&cand, gap.max(1) as i32, None)
+                        .iter()
+                        .all(|&id| keeps_gap(&cand, &existing[id as usize], gap));
+                    if clears_existing && placed.iter().all(|s| keeps_gap(&cand, s, gap)) {
                         covered += rect_area(&cand);
                         placed.push(cand);
                     }
@@ -366,8 +389,8 @@ impl UnionFind {
 /// layer, or on a `connect`-declared layer pair), then for each net flag any
 /// conductor-layer area that exceeds `max_ratio ×` the connected gate-layer area.
 ///
-/// v0 bounds (honest): connectivity is brute-force all-pairs overlap (a spatial
-/// index is the scaling pass), the ratio is single-conductor-layer (not the
+/// v0 bounds (honest): connectivity uses a `RegionIndex` for the touch/overlap
+/// candidate search (rechecked exactly); the ratio is single-conductor-layer (not the
 /// cumulative per-metal-layer charge model), and a net with conductor but no gate
 /// is treated as not-applicable rather than flagged.
 fn antenna_violations(
@@ -380,9 +403,18 @@ fn antenna_violations(
     let connects = |la: i16, lb: i16| -> bool {
         la == lb || connect.iter().any(|&(x, y)| (x == la && y == lb) || (x == lb && y == la))
     };
+    // Connectivity only unions shapes that touch/overlap; a RegionIndex over all
+    // shapes returns the touching candidates (halo of 1 dbu catches abutment too),
+    // rechecked exactly — near-linear instead of all-pairs, same union result.
+    let rects: Vec<Rect> = all.iter().map(|&(_, r)| r).collect();
+    let idx = RegionIndex::build(&rects);
     let mut uf = UnionFind::new(n);
     for i in 0..n {
-        for j in (i + 1)..n {
+        for jd in idx.within(&all[i].1, 1, Some(i as u32)) {
+            let j = jd as usize;
+            if j <= i {
+                continue;
+            }
             let (li, ri) = all[i];
             let (lj, rj) = all[j];
             if connects(li, lj) && touch_or_overlap(&ri, &rj) {
@@ -615,6 +647,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn indexed_spacing_matches_brute_force_at_scale() {
+        // A deterministic field of shapes with varied gaps; the RegionIndex-backed
+        // spacing check must find exactly the same violations as an all-pairs scan.
+        let min_s = 50i64;
+        let mut elems = Vec::new();
+        let mut shapes = Vec::new();
+        for gy in 0..24i32 {
+            for gx in 0..24i32 {
+                // pitch jitters so some neighbours are < min_s apart and some aren't
+                let x = gx * 80 + (gx * 13 + gy * 5) % 40;
+                let y = gy * 80 + (gy * 11 + gx * 7) % 40;
+                let r = Rect::new(x, y, x + 50, y + 50);
+                shapes.push(r);
+                elems.push(rect_elem(68, r.x0, r.y0, r.x1, r.y1));
+            }
+        }
+        let lib = lib_with(elems);
+        let rules = Rules::parse(&format!("space 68 {min_s}\n")).unwrap();
+
+        // indexed result (rule=="space" pairs → comparable tuples)
+        let key = |r: &Rect| (r.x0, r.y0, r.x1, r.y1);
+        let mut got: Vec<_> = check_library(&lib, None, &rules)
+            .unwrap()
+            .into_iter()
+            .filter(|v| v.rule == "space")
+            .map(|v| (key(&v.a), key(&v.b.unwrap()), v.value))
+            .collect();
+
+        // brute-force reference (all-pairs)
+        let mut want = Vec::new();
+        for i in 0..shapes.len() {
+            for j in (i + 1)..shapes.len() {
+                if let Some(s) = spacing(&shapes[i], &shapes[j]) {
+                    if s < min_s {
+                        want.push((key(&shapes[i]), key(&shapes[j]), s));
+                    }
+                }
+            }
+        }
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "indexed spacing must equal all-pairs");
+        assert!(!want.is_empty(), "the fixture should actually contain violations");
     }
 
     #[test]

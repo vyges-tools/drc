@@ -99,8 +99,9 @@ GDS load + hierarchy **flatten** (via `vyges-layout`), text + `--json` reports, 
   measures the resulting polygons (this also means density can over-count where
   same-layer shapes overlap);
 - non-Manhattan polygons fall back to their **bounding box**;
-- spacing / density / antenna-connectivity are **brute-force** all-pairs (a spatial
-  index is the scaling pass, as in `vyges-extract`'s coupling grid);
+- spacing, antenna-connectivity, and fill clearance scale via a `vyges-layout`
+  **`RegionIndex`** (spatial index) — nearby-shape queries rechecked with the exact
+  predicate, results identical to all-pairs; density windowing is still a direct scan;
 - antenna is a **single-conductor-layer ratio** with a simple overlap-based connect
   model — not yet the cumulative per-metal-layer charge model or a diode-discharge
   credit, and a net with conductor but no gate is treated as not-applicable;

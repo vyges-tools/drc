@@ -12,4 +12,4 @@ dependencies = [
 [[package]]
 name = "vyges-layout"
 version = "0.0.1"
-source = "git+https://github.com/vyges-tools/layout?branch=main#2baee0bc783b75f67d16c59d82c0f8e9c86c2645"
+source = "git+https://github.com/vyges-tools/layout?branch=main#43243cf7ce50f17814631502ab04d781b999049f"
