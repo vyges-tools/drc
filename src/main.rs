@@ -58,6 +58,8 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
             "venc" => format!("enclosure {} dbu < required {} on any single axis", v.value, v.limit),
             // grid: the offending vertex is carried in the location field
             "grid" => "off-grid vertex".to_string(),
+            // track: a min-width wire off the routing-track centerline grid
+            "track" => "min-width wire off the routing-track centerline".to_string(),
             // width / space: linear DB units, show µm too
             _ => format!("{} dbu ({:.4} µm) < min {}", v.value, um(v.value), v.limit),
         };

@@ -60,6 +60,7 @@ enclosure  68     66 40           # every layer-66 shape enclosed by layer-68 wi
 span       25     34              # every cut on 25 must span the full width of the metal on 34
 venc       19     21 20 8         # via 21 enclosed by metal 19 by ≥20 on one axis (≥8 both sides)
 grid       40     1 96            # layer-40 vertices on a 96-dbu y-grid (x free)
+track      40     96 192 48       # 96-wide layer-40 wires centered on a 192-dbu track grid (offset 48)
 fill       70     30 100000 600 400   # top layer 70 to 30% per window (600-fill, 400-gap)
 ```
 
@@ -68,7 +69,7 @@ the checker — the checker ignores it.
 
 ## Current state (v0.1.2)
 
-**Working & tested:** nine rule classes plus a fill generator —
+**Working & tested:** ten rule classes plus a fill generator —
 
 - **width** — a shape whose smaller dimension is below the layer minimum;
 - **spacing** — two distinct same-layer shapes closer than the minimum (run-length
@@ -100,6 +101,10 @@ the checker — the checker ignores it.
   multiple of `xpitch`, a horizontal edge's y a multiple of `ypitch` (a pitch of 1 leaves
   that axis free). Collinear off-grid edges are merged first (a wire drawn as many rects
   counts once), then each off-grid vertex is flagged.
+- **track** — a **minimum-width** wire (short dimension equal to `width`) must be centered
+  on the routing-track grid: its centerline, on the width axis, a multiple of `pitch`
+  offset by `offset`. Collinear wire segments are merged first, so a wire drawn as many
+  rects counts once. The generic advanced-node "min-width tracks lie on the routing grid" rule.
 
 Plus the **`fill` generator** (`vyges-drc fill`): for each `fill` rule it tiles every
 window below the target with clearance-respecting fill shapes and writes a **filled

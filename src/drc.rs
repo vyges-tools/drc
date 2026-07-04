@@ -37,7 +37,7 @@ use crate::rules::Rules;
 
 #[derive(Debug, Clone)]
 pub struct Violation {
-    pub rule: &'static str, // "width" | "space" | "area" | "density" | "antenna" | "enclosure" | "span" | "venc"
+    pub rule: &'static str, // width|space|area|density|antenna|enclosure|span|venc|grid|track
     pub layer: i16,
     /// The bound that was violated. DB units for width/space, DB units² for area,
     /// **percent** for density, and **centi-ratio** (ratio × 100) for antenna.
@@ -186,6 +186,12 @@ pub fn check_library(
             grid_violations(rule, shapes, &mut viols);
         }
     }
+    // track is per-layer (min-width wire centerlines must lie on the routing-track grid)
+    for rule in &rules.track {
+        if let Some(shapes) = by_layer.get(&rule.layer) {
+            track_violations(rule, shapes, &mut viols);
+        }
+    }
     Ok(viols)
 }
 
@@ -320,9 +326,11 @@ fn span_violations(
 /// actually achieves on a `minor`-qualifying axis (`-1` when no single outer encloses
 /// it), and `limit` is `major`.
 ///
-/// v0 bound (honest): outer shapes are not pre-merged and margins are bbox-measured, so
-/// an inner enclosed only by the union of abutting outer rects, or an edge-projection
-/// corner case, can differ from a merged / projection-metric check.
+/// v0 bound (honest): margins are measured against the single containing rect, not the
+/// merged outer geometry, so on dense multi-rect metal it can **over-report** — the local
+/// metal extends via abutting rects the bbox margin doesn't see, while the true check is a
+/// projection metric on the merged shape. This is conservative (it over-flags rather than
+/// misses), and an exact match needs the merged/projection geometry.
 fn venc_violations(
     rule: &crate::rules::Venc,
     by_layer: &BTreeMap<i16, Vec<Rect>>,
@@ -390,6 +398,79 @@ fn grid_violations(rule: &crate::rules::Grid, shapes: &[Rect], out: &mut Vec<Vio
     merged_edge_endpoints(false, horiz, &mut pts);
     for (x, y) in pts {
         out.push(Violation { rule: "grid", layer: rule.layer, limit: 0, value: 0, a: Rect::new(x, y, x, y), b: None });
+    }
+}
+
+/// Routing-track centerline: a **minimum-width** wire (its short dimension equal to
+/// `width`) must be centered on the routing-track grid — its centerline, on the width
+/// axis, a multiple of `pitch` offset by `offset`. Only min-width wires whose width-edges
+/// are on the `width` grid are checked (wider wires, and off-grid edges, are other rules'
+/// concern). The width axis is the shorter dimension (a tie defaults to y).
+///
+/// Collinear off-track min-width wire segments are merged first (a wire drawn as many
+/// abutting rects is one wire), so the count matches a merged-geometry check; one violation
+/// is emitted per merged wire.
+fn track_violations(rule: &crate::rules::Track, shapes: &[Rect], out: &mut Vec<Violation>) {
+    // off-track wires grouped by centerline: horizontal (y-centerline → x-spans) and
+    // vertical (x-centerline → y-spans).
+    let mut horiz: BTreeMap<i64, Vec<(i32, i32)>> = BTreeMap::new();
+    let mut vert: BTreeMap<i64, Vec<(i32, i32)>> = BTreeMap::new();
+    for r in shapes {
+        let (w, h) = ((r.x1 - r.x0) as i64, (r.y1 - r.y0) as i64);
+        if w.min(h) != rule.width {
+            continue; // only 1x (minimum-width) wires
+        }
+        // width axis = the shorter dimension (horizontal wire → y, vertical → x; tie → y)
+        let horizontal = h <= w;
+        let (lo, hi) = if horizontal { (r.y0 as i64, r.y1 as i64) } else { (r.x0 as i64, r.x1 as i64) };
+        if lo % rule.width != 0 || hi % rule.width != 0 {
+            continue; // width-edges off the width grid → a grid rule's concern, not this
+        }
+        let cl = (lo + hi) / 2;
+        if (cl - rule.offset).rem_euclid(rule.pitch) != 0 {
+            if horizontal {
+                horiz.entry(cl).or_default().push((r.x0, r.x1));
+            } else {
+                vert.entry(cl).or_default().push((r.y0, r.y1));
+            }
+        }
+    }
+    let half = (rule.width / 2) as i32;
+    emit_merged_track(true, horiz, half, rule.layer, out);
+    emit_merged_track(false, vert, half, rule.layer, out);
+}
+
+/// Merge collinear abutting/overlapping wire spans per centerline and emit one `track`
+/// violation per merged wire. `horizontal` → centerline is a y value with x-spans.
+fn emit_merged_track(
+    horizontal: bool,
+    by_cl: BTreeMap<i64, Vec<(i32, i32)>>,
+    half: i32,
+    layer: i16,
+    out: &mut Vec<Violation>,
+) {
+    for (cl, mut spans) in by_cl {
+        spans.sort_unstable();
+        let mut cur = spans[0];
+        let mut segs = Vec::new();
+        for s in spans.into_iter().skip(1) {
+            if s.0 <= cur.1 {
+                cur.1 = cur.1.max(s.1);
+            } else {
+                segs.push(cur);
+                cur = s;
+            }
+        }
+        segs.push(cur);
+        let cl = cl as i32;
+        for (a, b) in segs {
+            let rect = if horizontal {
+                Rect::new(a, cl - half, b, cl + half)
+            } else {
+                Rect::new(cl - half, a, cl + half, b)
+            };
+            out.push(Violation { rule: "track", layer, limit: 0, value: 0, a: rect, b: None });
+        }
     }
 }
 
@@ -812,6 +893,22 @@ mod tests {
         // a cut with no metal under it -> skipped (not this rule's concern)
         let orphan = lib_with(vec![rect_elem(25, 5000, 5000, 5100, 5100)]);
         assert!(check_library(&orphan, None, &rules).unwrap().is_empty());
+    }
+
+    #[test]
+    fn track_min_width_wires_on_centerline_grid() {
+        // width=96, pitch=192, offset=48: a 96-tall horizontal wire's y-centerline must be
+        // 48 + 192N. y 0..96 -> cl 48 (on grid); y 96..192 -> cl 144 (off -> flag).
+        let rules = Rules::parse("track 40 96 192 48\n").unwrap();
+        let t = |lib: &Library| check_library(lib, None, &rules).unwrap().into_iter().filter(|v| v.rule == "track").count();
+        assert_eq!(t(&lib_with(vec![rect_elem(40, 0, 0, 500, 96)])), 0); // on-grid wire
+        assert_eq!(t(&lib_with(vec![rect_elem(40, 0, 96, 500, 192)])), 1); // off-grid (cl 144)
+        // off-grid wire drawn as two abutting rects -> merged -> still one
+        assert_eq!(t(&lib_with(vec![rect_elem(40, 0, 96, 500, 192), rect_elem(40, 500, 96, 900, 192)])), 1);
+        // a 2x-wide (192-tall) wire is not a 1x track -> not checked
+        assert_eq!(t(&lib_with(vec![rect_elem(40, 0, 96, 500, 288)])), 0);
+        // a min-width wire with an off-96-grid edge -> skipped (a grid rule's concern)
+        assert_eq!(t(&lib_with(vec![rect_elem(40, 0, 50, 500, 146)])), 0);
     }
 
     #[test]

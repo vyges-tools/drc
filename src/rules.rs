@@ -82,6 +82,18 @@ pub struct Grid {
     pub ypitch: i64,
 }
 
+/// A routing-track rule: a **minimum-width** wire (short dimension equal to `width`) must
+/// be centered on the routing-track grid — its centerline, on the width axis, a multiple
+/// of `pitch` offset by `offset` (DB units). The generic advanced-node "min-width tracks
+/// lie on the routing grid" rule.
+#[derive(Debug, Clone, Copy)]
+pub struct Track {
+    pub layer: i16,
+    pub width: i64,
+    pub pitch: i64,
+    pub offset: i64,
+}
+
 /// A metal-fill rule (drives the `fill` generator, not the checker): top up
 /// `layer` coverage to at least `target_pct` per square `window`, by tiling
 /// `size`-square fill shapes that keep `gap` clearance from existing geometry.
@@ -117,6 +129,8 @@ pub struct Rules {
     pub venc: Vec<Venc>,
     /// manufacturing-grid rules (layer vertices must lie on an x/y grid).
     pub grid: Vec<Grid>,
+    /// routing-track rules (min-width wire centerlines must lie on the track grid).
+    pub track: Vec<Track>,
     /// metal-fill rules (consumed by the `fill` generator, not the checker).
     pub fill: Vec<Fill>,
 }
@@ -238,6 +252,16 @@ impl Rules {
                     }
                     r.grid.push(Grid { layer, xpitch, ypitch });
                 }
+                "track" => {
+                    // `track <layer> <width> <pitch> <offset>`
+                    let width = arg(0, "track: expected `<layer> <width> <pitch> <offset>`")?;
+                    let pitch = arg(1, "track: expected `<layer> <width> <pitch> <offset>`")?;
+                    let offset = arg(2, "track: expected `<layer> <width> <pitch> <offset>`")?;
+                    if width <= 0 || pitch <= 0 {
+                        return Err(err("track: width and pitch must be > 0"));
+                    }
+                    r.track.push(Track { layer, width, pitch, offset });
+                }
                 "fill" => {
                     // `fill <layer> <target_pct> <window> <size> <gap>`
                     let f = Fill {
@@ -267,6 +291,7 @@ impl Rules {
             && r.span.is_empty()
             && r.venc.is_empty()
             && r.grid.is_empty()
+            && r.track.is_empty()
             && r.fill.is_empty()
         {
             return Err(RulesError("no rules defined".into()));
@@ -345,6 +370,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_track() {
+        let r = Rules::parse("track 40 96 192 48\n").unwrap();
+        assert_eq!(r.track.len(), 1);
+        let t = r.track[0];
+        assert_eq!((t.layer, t.width, t.pitch, t.offset), (40, 96, 192, 48));
+    }
+
+    #[test]
     fn rejects_garbage() {
         assert!(Rules::parse("width met1 170\n").is_err()); // non-numeric layer
         assert!(Rules::parse("# only comments\n").is_err()); // no rules
@@ -360,6 +393,8 @@ mod tests {
         assert!(Rules::parse("venc 19 21 8 20\n").is_err()); // major must be >= minor
         assert!(Rules::parse("grid 40 1\n").is_err()); // grid needs both pitches
         assert!(Rules::parse("grid 40 0 96\n").is_err()); // pitch must be > 0
+        assert!(Rules::parse("track 40 96 192\n").is_err()); // track needs offset
+        assert!(Rules::parse("track 40 96 0 48\n").is_err()); // pitch must be > 0
         assert!(Rules::parse("fill 68 30 1000 50\n").is_err()); // missing gap
         assert!(Rules::parse("fill 68 200 1000 50 60\n").is_err()); // target% > 100
         assert!(Rules::parse("fill 68 30 0 50 60\n").is_err()); // window 0
