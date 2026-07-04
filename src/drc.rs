@@ -37,7 +37,7 @@ use crate::rules::Rules;
 
 #[derive(Debug, Clone)]
 pub struct Violation {
-    pub rule: &'static str, // "width" | "space" | "area" | "density" | "antenna"
+    pub rule: &'static str, // "width" | "space" | "area" | "density" | "antenna" | "enclosure" | "span"
     pub layer: i16,
     /// The bound that was violated. DB units for width/space, DB units² for area,
     /// **percent** for density, and **centi-ratio** (ratio × 100) for antenna.
@@ -172,6 +172,10 @@ pub fn check_library(
     for rule in &rules.enclosure {
         enclosure_violations(rule, &by_layer, &mut viols);
     }
+    // span is cross-layer (a cut must span the width of the metal it sits on)
+    for rule in &rules.span {
+        span_violations(rule, &by_layer, &mut viols);
+    }
     Ok(viols)
 }
 
@@ -254,6 +258,46 @@ fn enclosure_violations(
                 a: *inner,
                 b: None,
             }),
+        }
+    }
+}
+
+/// Via-span: every `cut` shape sitting on a `metal` shape must span that metal's full
+/// width (its shorter dimension) with edges coincident on both width-sides. Each cut is
+/// matched to the metal it overlaps most; a cut on no metal is skipped (that is a
+/// coverage rule, not this one). `value` is the total edge deviation in DB units — how
+/// far the cut's two width-edges are from the metal's — and `limit` is 0 (must be
+/// exact), so a cut that is narrower, shifted, or protruding past the metal all flag.
+///
+/// v0 bound (honest): metals are not pre-merged, so a wire drawn as abutting rects can
+/// mis-measure the width under a cut; a square metal (no distinct width axis) uses the
+/// x-axis by convention.
+fn span_violations(
+    rule: &crate::rules::Span,
+    by_layer: &BTreeMap<i16, Vec<Rect>>,
+    out: &mut Vec<Violation>,
+) {
+    let Some(cuts) = by_layer.get(&rule.cut) else { return };
+    let empty = Vec::new();
+    let metals = by_layer.get(&rule.metal).unwrap_or(&empty);
+    for cut in cuts {
+        // the metal this cut sits on = the metal shape it overlaps most
+        let Some(m) = metals
+            .iter()
+            .filter(|m| overlap_area(cut, m) > 0)
+            .max_by_key(|m| overlap_area(cut, m))
+        else {
+            continue; // no metal under this cut — not this rule's concern
+        };
+        // width axis = the metal's shorter dimension (x on a square, by convention);
+        // the cut must span the metal edge-to-edge along it.
+        let dev = if (m.x1 - m.x0) <= (m.y1 - m.y0) {
+            (cut.x0 - m.x0).abs() as i64 + (cut.x1 - m.x1).abs() as i64
+        } else {
+            (cut.y0 - m.y0).abs() as i64 + (cut.y1 - m.y1).abs() as i64
+        };
+        if dev > 0 {
+            out.push(Violation { rule: "span", layer: rule.cut, limit: 0, value: dev, a: *cut, b: Some(*m) });
         }
     }
 }
@@ -614,6 +658,36 @@ mod tests {
         let v = check_library(&lib, None, &Rules::parse("enclosure 68 66 10\n").unwrap()).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].value, -1, "not-enclosed sentinel");
+    }
+
+    #[test]
+    fn span_via_must_match_metal_width() {
+        // a metal on layer 34 running vertically: width 100 in x, 0..600 in y.
+        // a cut on layer 25 that spans the full 100-wide metal edge-to-edge passes;
+        // one only 60 wide (inset) fails; one protruding past the metal edge fails;
+        // a cut on no metal is skipped.
+        let rules = Rules::parse("span 25 34\n").unwrap();
+
+        // exact span 0..100 in x -> clean
+        let ok = lib_with(vec![rect_elem(34, 0, 0, 100, 600), rect_elem(25, 0, 250, 100, 350)]);
+        assert!(check_library(&ok, None, &rules).unwrap().is_empty());
+
+        // 60-wide cut inset (20..80) -> 20 short on each side, dev 40
+        let narrow = lib_with(vec![rect_elem(34, 0, 0, 100, 600), rect_elem(25, 20, 250, 80, 350)]);
+        let v = check_library(&narrow, None, &rules).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!((v[0].rule, v[0].value, v[0].limit), ("span", 40, 0));
+        assert!(v[0].b.is_some());
+
+        // cut protruding past the metal low edge (-10..100) -> dev 10
+        let over = lib_with(vec![rect_elem(34, 0, 0, 100, 600), rect_elem(25, -10, 250, 100, 350)]);
+        let v = check_library(&over, None, &rules).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].value, 10);
+
+        // a cut with no metal under it -> skipped (not this rule's concern)
+        let orphan = lib_with(vec![rect_elem(25, 5000, 5000, 5100, 5100)]);
+        assert!(check_library(&orphan, None, &rules).unwrap().is_empty());
     }
 
     #[test]

@@ -47,6 +47,17 @@ pub struct Enclosure {
     pub min: i64,
 }
 
+/// A via-span rule: every `cut`-layer shape sitting on a `metal`-layer shape must
+/// span the metal's full width (its shorter dimension), edges coincident on both
+/// width-sides. A cut narrower than the metal, shifted, or protruding past the metal
+/// edge violates — the generic form of an advanced-node "via lands on the full wire
+/// width" rule.
+#[derive(Debug, Clone, Copy)]
+pub struct Span {
+    pub cut: i16,
+    pub metal: i16,
+}
+
 /// A metal-fill rule (drives the `fill` generator, not the checker): top up
 /// `layer` coverage to at least `target_pct` per square `window`, by tiling
 /// `size`-square fill shapes that keep `gap` clearance from existing geometry.
@@ -76,6 +87,8 @@ pub struct Rules {
     pub antenna: Vec<Antenna>,
     /// enclosure rules (inner must be enclosed by outer with a margin).
     pub enclosure: Vec<Enclosure>,
+    /// via-span rules (a cut must span the full width of the metal it sits on).
+    pub span: Vec<Span>,
     /// metal-fill rules (consumed by the `fill` generator, not the checker).
     pub fill: Vec<Fill>,
 }
@@ -167,6 +180,14 @@ impl Rules {
                         .ok_or_else(|| err("enclosure: expected an integer `<min>` (DB units)"))?;
                     r.enclosure.push(Enclosure { outer: layer, inner, min });
                 }
+                "span" => {
+                    // `span <cut_layer> <metal_layer>`
+                    let metal: i16 = toks
+                        .get(2)
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| err("span: expected `<cut_layer> <metal_layer>`"))?;
+                    r.span.push(Span { cut: layer, metal });
+                }
                 "fill" => {
                     // `fill <layer> <target_pct> <window> <size> <gap>`
                     let f = Fill {
@@ -193,6 +214,7 @@ impl Rules {
             && r.density.is_empty()
             && r.antenna.is_empty()
             && r.enclosure.is_empty()
+            && r.span.is_empty()
             && r.fill.is_empty()
         {
             return Err(RulesError("no rules defined".into()));
@@ -247,6 +269,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_span() {
+        let r = Rules::parse("span 66 68\nspan 25 34\n").unwrap();
+        assert_eq!(r.span.len(), 2);
+        assert_eq!((r.span[0].cut, r.span[0].metal), (66, 68));
+        assert_eq!((r.span[1].cut, r.span[1].metal), (25, 34));
+    }
+
+    #[test]
     fn rejects_garbage() {
         assert!(Rules::parse("width met1 170\n").is_err()); // non-numeric layer
         assert!(Rules::parse("# only comments\n").is_err()); // no rules
@@ -257,6 +287,7 @@ mod tests {
         assert!(Rules::parse("antenna 68 5\n").is_err()); // missing ratio
         assert!(Rules::parse("connect 66\n").is_err()); // connect needs two layers
         assert!(Rules::parse("enclosure 68 66\n").is_err()); // missing min
+        assert!(Rules::parse("span 66\n").is_err()); // span needs two layers
         assert!(Rules::parse("fill 68 30 1000 50\n").is_err()); // missing gap
         assert!(Rules::parse("fill 68 200 1000 50 60\n").is_err()); // target% > 100
         assert!(Rules::parse("fill 68 30 0 50 60\n").is_err()); // window 0

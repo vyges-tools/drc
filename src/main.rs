@@ -51,6 +51,8 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
             // enclosure: value < 0 is the "not enclosed at all" sentinel
             "enclosure" if v.value < 0 => format!("not enclosed (need {} margin)", v.limit),
             "enclosure" => format!("enclosure {} dbu < min {}", v.value, v.limit),
+            // span: value is the total edge deviation from spanning the metal width
+            "span" => format!("cut off metal-width by {} dbu (edges not coincident)", v.value),
             // width / space: linear DB units, show µm too
             _ => format!("{} dbu ({:.4} µm) < min {}", v.value, um(v.value), v.limit),
         };
@@ -62,6 +64,10 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
                 s.push_str(&format!("  antenna layer {}: {clause} on net {at}\n", v.layer))
             }
             None => s.push_str(&format!("  {} layer {}: {clause} at {at}\n", v.rule, v.layer)),
+            Some(b) if v.rule == "span" => s.push_str(&format!(
+                "  span layer {}: {clause} — cut {at} on metal ({},{})-({},{})\n",
+                v.layer, b.x0, b.y0, b.x1, b.y1
+            )),
             Some(b) => s.push_str(&format!(
                 "  {} layer {}: {clause} between {at} and ({},{})-({},{})\n",
                 v.rule, v.layer, b.x0, b.y0, b.x1, b.y1
