@@ -180,6 +180,12 @@ pub fn check_library(
     for rule in &rules.venc {
         venc_violations(rule, &by_layer, &mut viols);
     }
+    // grid is per-layer (vertices must lie on a manufacturing grid)
+    for rule in &rules.grid {
+        if let Some(shapes) = by_layer.get(&rule.layer) {
+            grid_violations(rule, shapes, &mut viols);
+        }
+    }
     Ok(viols)
 }
 
@@ -351,6 +357,72 @@ fn venc_violations(
         // else -1 (not enclosed by any single outer shape).
         let value = if contained { best_major.max(0) } else { -1 };
         out.push(Violation { rule: "venc", layer: rule.inner, limit: rule.major, value, a: *inner, b: None });
+    }
+}
+
+/// Manufacturing-grid check: every layer vertex must lie on the grid — its x a multiple
+/// of `xpitch`, its y a multiple of `ypitch` (a pitch of 1 leaves that axis free).
+/// Collinear off-grid edges are merged first (a wire drawn as many abutting rects is one
+/// edge), then each merged edge's two endpoint vertices are flagged (deduplicated) — so
+/// the count matches a merged-geometry vertex check like KLayout's `ongrid`.
+fn grid_violations(rule: &crate::rules::Grid, shapes: &[Rect], out: &mut Vec<Violation>) {
+    // group off-grid edge segments by their fixed coordinate:
+    //   vertical edges (fixed x, spanning y) checked against xpitch;
+    //   horizontal edges (fixed y, spanning x) checked against ypitch.
+    let mut vert: BTreeMap<i32, Vec<(i32, i32)>> = BTreeMap::new();
+    let mut horiz: BTreeMap<i32, Vec<(i32, i32)>> = BTreeMap::new();
+    for r in shapes {
+        if r.x0 as i64 % rule.xpitch != 0 {
+            vert.entry(r.x0).or_default().push((r.y0, r.y1));
+        }
+        if r.x1 as i64 % rule.xpitch != 0 {
+            vert.entry(r.x1).or_default().push((r.y0, r.y1));
+        }
+        if r.y0 as i64 % rule.ypitch != 0 {
+            horiz.entry(r.y0).or_default().push((r.x0, r.x1));
+        }
+        if r.y1 as i64 % rule.ypitch != 0 {
+            horiz.entry(r.y1).or_default().push((r.x0, r.x1));
+        }
+    }
+    let mut pts = std::collections::BTreeSet::new();
+    merged_edge_endpoints(true, vert, &mut pts);
+    merged_edge_endpoints(false, horiz, &mut pts);
+    for (x, y) in pts {
+        out.push(Violation { rule: "grid", layer: rule.layer, limit: 0, value: 0, a: Rect::new(x, y, x, y), b: None });
+    }
+}
+
+/// Merge collinear edge segments (same fixed coordinate, overlapping/abutting spans) and
+/// collect the two endpoint vertices of each merged segment into `pts` (deduplicated).
+/// `x_fixed` picks the axis: `true` = vertical edges keyed by x with y-spans.
+fn merged_edge_endpoints(
+    x_fixed: bool,
+    by_coord: BTreeMap<i32, Vec<(i32, i32)>>,
+    pts: &mut std::collections::BTreeSet<(i32, i32)>,
+) {
+    for (coord, mut spans) in by_coord {
+        spans.sort_unstable();
+        let mut cur = spans[0];
+        let mut segs = Vec::new();
+        for s in spans.into_iter().skip(1) {
+            if s.0 <= cur.1 {
+                cur.1 = cur.1.max(s.1); // overlap or abut -> extend
+            } else {
+                segs.push(cur);
+                cur = s;
+            }
+        }
+        segs.push(cur);
+        for (a, b) in segs {
+            if x_fixed {
+                pts.insert((coord, a));
+                pts.insert((coord, b));
+            } else {
+                pts.insert((a, coord));
+                pts.insert((b, coord));
+            }
+        }
     }
 }
 
@@ -740,6 +812,22 @@ mod tests {
         // a cut with no metal under it -> skipped (not this rule's concern)
         let orphan = lib_with(vec![rect_elem(25, 5000, 5000, 5100, 5100)]);
         assert!(check_library(&orphan, None, &rules).unwrap().is_empty());
+    }
+
+    #[test]
+    fn grid_flags_offgrid_vertices_merged() {
+        // ypitch=100, x free: a wire off-grid in y flags its two horizontal edges'
+        // endpoint vertices (4 points); a wire drawn as abutting rects merges to the same 4.
+        let rules = Rules::parse("grid 40 1 100\n").unwrap();
+        let grid = |lib: &Library| check_library(lib, None, &rules).unwrap().into_iter().filter(|v| v.rule == "grid").count();
+
+        // on-grid wire (y 0..100) -> clean
+        assert_eq!(grid(&lib_with(vec![rect_elem(40, 0, 0, 500, 100)])), 0);
+        // off-grid wire (y 50..150): y0=50, y1=150 both off the 100-grid -> 4 endpoints
+        assert_eq!(grid(&lib_with(vec![rect_elem(40, 0, 50, 500, 150)])), 4);
+        // same wire as two abutting rects -> collinear edges merge -> still 4, not 8
+        let split = lib_with(vec![rect_elem(40, 0, 50, 500, 150), rect_elem(40, 500, 50, 1000, 150)]);
+        assert_eq!(grid(&split), 4);
     }
 
     #[test]

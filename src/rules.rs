@@ -72,6 +72,16 @@ pub struct Venc {
     pub minor: i64,
 }
 
+/// A manufacturing-grid rule: every shape vertex on the layer must lie on the grid — its
+/// x a multiple of `xpitch` and its y a multiple of `ypitch` (DB units). A pitch of 1
+/// leaves that axis unconstrained. Flags each distinct off-grid vertex on the layer.
+#[derive(Debug, Clone, Copy)]
+pub struct Grid {
+    pub layer: i16,
+    pub xpitch: i64,
+    pub ypitch: i64,
+}
+
 /// A metal-fill rule (drives the `fill` generator, not the checker): top up
 /// `layer` coverage to at least `target_pct` per square `window`, by tiling
 /// `size`-square fill shapes that keep `gap` clearance from existing geometry.
@@ -105,6 +115,8 @@ pub struct Rules {
     pub span: Vec<Span>,
     /// asymmetric via-enclosure rules (inner enclosed by outer, satisfied on one axis).
     pub venc: Vec<Venc>,
+    /// manufacturing-grid rules (layer vertices must lie on an x/y grid).
+    pub grid: Vec<Grid>,
     /// metal-fill rules (consumed by the `fill` generator, not the checker).
     pub fill: Vec<Fill>,
 }
@@ -217,6 +229,15 @@ impl Rules {
                     }
                     r.venc.push(Venc { outer: layer, inner, major, minor });
                 }
+                "grid" => {
+                    // `grid <layer> <xpitch> <ypitch>`
+                    let xpitch = arg(0, "grid: expected `<layer> <xpitch> <ypitch>`")?;
+                    let ypitch = arg(1, "grid: expected `<layer> <xpitch> <ypitch>`")?;
+                    if xpitch <= 0 || ypitch <= 0 {
+                        return Err(err("grid: xpitch and ypitch must be > 0"));
+                    }
+                    r.grid.push(Grid { layer, xpitch, ypitch });
+                }
                 "fill" => {
                     // `fill <layer> <target_pct> <window> <size> <gap>`
                     let f = Fill {
@@ -245,6 +266,7 @@ impl Rules {
             && r.enclosure.is_empty()
             && r.span.is_empty()
             && r.venc.is_empty()
+            && r.grid.is_empty()
             && r.fill.is_empty()
         {
             return Err(RulesError("no rules defined".into()));
@@ -315,6 +337,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_grid() {
+        let r = Rules::parse("grid 40 1 96\ngrid 50 96 1\n").unwrap();
+        assert_eq!(r.grid.len(), 2);
+        assert_eq!((r.grid[0].layer, r.grid[0].xpitch, r.grid[0].ypitch), (40, 1, 96));
+        assert_eq!((r.grid[1].layer, r.grid[1].xpitch, r.grid[1].ypitch), (50, 96, 1));
+    }
+
+    #[test]
     fn rejects_garbage() {
         assert!(Rules::parse("width met1 170\n").is_err()); // non-numeric layer
         assert!(Rules::parse("# only comments\n").is_err()); // no rules
@@ -328,6 +358,8 @@ mod tests {
         assert!(Rules::parse("span 66\n").is_err()); // span needs two layers
         assert!(Rules::parse("venc 19 21 20\n").is_err()); // venc needs major and minor
         assert!(Rules::parse("venc 19 21 8 20\n").is_err()); // major must be >= minor
+        assert!(Rules::parse("grid 40 1\n").is_err()); // grid needs both pitches
+        assert!(Rules::parse("grid 40 0 96\n").is_err()); // pitch must be > 0
         assert!(Rules::parse("fill 68 30 1000 50\n").is_err()); // missing gap
         assert!(Rules::parse("fill 68 200 1000 50 60\n").is_err()); // target% > 100
         assert!(Rules::parse("fill 68 30 0 50 60\n").is_err()); // window 0

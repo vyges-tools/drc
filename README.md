@@ -59,6 +59,7 @@ antenna    68     5  400          # per net: layer-68 area ≤ 400 × its layer-
 enclosure  68     66 40           # every layer-66 shape enclosed by layer-68 with ≥40 margin
 span       25     34              # every cut on 25 must span the full width of the metal on 34
 venc       19     21 20 8         # via 21 enclosed by metal 19 by ≥20 on one axis (≥8 both sides)
+grid       40     1 96            # layer-40 vertices on a 96-dbu y-grid (x free)
 fill       70     30 100000 600 400   # top layer 70 to 30% per window (600-fill, 400-gap)
 ```
 
@@ -67,7 +68,7 @@ the checker — the checker ignores it.
 
 ## Current state (v0.1.2)
 
-**Working & tested:** eight rule classes plus a fill generator —
+**Working & tested:** nine rule classes plus a fill generator —
 
 - **width** — a shape whose smaller dimension is below the layer minimum;
 - **spacing** — two distinct same-layer shapes closer than the minimum (run-length
@@ -95,6 +96,10 @@ the checker — the checker ignores it.
   enclosure — a large enclosure along the routing direction, a small one across it, on
   only one axis). Flags a via not enclosed by any single outer, or meeting the margins
   on neither axis.
+- **grid** — every layer vertex must lie on a manufacturing grid: a vertical edge's x a
+  multiple of `xpitch`, a horizontal edge's y a multiple of `ypitch` (a pitch of 1 leaves
+  that axis free). Collinear off-grid edges are merged first (a wire drawn as many rects
+  counts once), then each off-grid vertex is flagged.
 
 Plus the **`fill` generator** (`vyges-drc fill`): for each `fill` rule it tiles every
 window below the target with clearance-respecting fill shapes and writes a **filled

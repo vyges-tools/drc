@@ -56,6 +56,8 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
             // venc: value < 0 is the "not enclosed by a single outer" sentinel
             "venc" if v.value < 0 => format!("not enclosed by a single outer (need {} on one axis)", v.limit),
             "venc" => format!("enclosure {} dbu < required {} on any single axis", v.value, v.limit),
+            // grid: the offending vertex is carried in the location field
+            "grid" => "off-grid vertex".to_string(),
             // width / space: linear DB units, show µm too
             _ => format!("{} dbu ({:.4} µm) < min {}", v.value, um(v.value), v.limit),
         };
