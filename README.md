@@ -115,6 +115,11 @@ GDS load + hierarchy **flatten** (via `vyges-layout`), text + `--json` reports, 
   proper DRC unions same-layer geometry first (a `vyges-layout` boolean OR) and
   measures the resulting polygons (this also means density can over-count where
   same-layer shapes overlap);
+- **edge-coincidence** rules wait on an oriented-edge layer — the merged boundary as
+  *directioned* edges plus **local** edge-vs-edge operations — which a bounding-box model
+  doesn't carry; a rule that asks "does this edge lie on the merged wire boundary" (a via
+  flush to the wire edge, tip-to-side spacing) needs it. Established DRC engineering (every
+  production checker does it), on the build list — not open research;
 - non-Manhattan polygons fall back to their **bounding box**;
 - spacing, antenna-connectivity, and fill clearance scale via a `vyges-layout`
   **`RegionIndex`** (spatial index) — nearby-shape queries rechecked with the exact
@@ -154,20 +159,15 @@ violation report and measured against the existing baseline. Each names a **code
    suite — this engine's brute-force-equivalence spacing test (`indexed_spacing_matches_brute_force_at_scale`
    in `drc.rs`) and `vyges-layout`'s boolean-vs-rasterizer and GDS↔OASIS round-trip tests —
    and generalize them into a corpus-driven harness.
-2. **Same-layer geometry merging (pre-union).** Shapes are measured **per input boundary,
-   not pre-merged**, so a wide wire drawn as abutting rectangles is measured as drawn.
-   *Open question:* an efficient same-layer **union** pass and measurement on the resulting
-   rectilinear polygons (width/spacing/area/density on merged shapes). *Start from:* the
-   per-layer shape collection in `drc.rs::check_library` and the boolean OR in `vyges-layout`.
-3. **General-angle / non-Manhattan geometry.** Non-rectangular polygons currently fall back
+2. **General-angle / non-Manhattan geometry.** Non-rectangular polygons currently fall back
    to their bounding box. *Open question:* exact width, spacing, and area on rectilinear —
    and eventually all-angle — polygons. *Start from:* the bbox fallback in `drc.rs::elem_rect`
    / `polys_on`, and general clipping in `vyges-layout`.
-4. **Cumulative antenna charge model.** The antenna check is a single-conductor-layer area
+3. **Cumulative antenna charge model.** The antenna check is a single-conductor-layer area
    ratio. *Open question:* the cumulative **per-metal-layer charge** model with a
    diode-discharge credit, still deck-driven and open-PDK-validated. *Start from:*
    `drc.rs::antenna_violations` and the union-find net extraction beside it.
-5. **Full-block scaling & spatial indexing.** Spacing, antenna-connectivity, and fill
+4. **Full-block scaling & spatial indexing.** Spacing, antenna-connectivity, and fill
    clearance ride a uniform-grid spatial index (`vyges-geom::RegionIndex`). *Open question:*
    characterize on full blocks and study index choice (grid vs. R-tree vs. hierarchical) and
    parallelism vs. layout density. *Start from:* `RegionIndex` in `vyges-geom` and its call
