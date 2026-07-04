@@ -37,7 +37,7 @@ use crate::rules::Rules;
 
 #[derive(Debug, Clone)]
 pub struct Violation {
-    pub rule: &'static str, // "width" | "space" | "area" | "density" | "antenna" | "enclosure" | "span"
+    pub rule: &'static str, // "width" | "space" | "area" | "density" | "antenna" | "enclosure" | "span" | "venc"
     pub layer: i16,
     /// The bound that was violated. DB units for width/space, DB units² for area,
     /// **percent** for density, and **centi-ratio** (ratio × 100) for antenna.
@@ -176,6 +176,10 @@ pub fn check_library(
     for rule in &rules.span {
         span_violations(rule, &by_layer, &mut viols);
     }
+    // venc is cross-layer (asymmetric via enclosure, satisfied on one axis)
+    for rule in &rules.venc {
+        venc_violations(rule, &by_layer, &mut viols);
+    }
     Ok(viols)
 }
 
@@ -299,6 +303,54 @@ fn span_violations(
         if dev > 0 {
             out.push(Violation { rule: "span", layer: rule.cut, limit: 0, value: dev, a: *cut, b: Some(*m) });
         }
+    }
+}
+
+/// Asymmetric via-enclosure: every `inner` shape must be enclosed by a single `outer`
+/// shape such that, on at least one axis, the enclosure on both opposite sides is ≥
+/// `minor` and on at least one side is ≥ `major` — the generic "line-end / side" via
+/// enclosure (a large enclosure along the routing direction, a small one across it,
+/// required on only one axis). `value` is the best major-side enclosure the inner
+/// actually achieves on a `minor`-qualifying axis (`-1` when no single outer encloses
+/// it), and `limit` is `major`.
+///
+/// v0 bound (honest): outer shapes are not pre-merged and margins are bbox-measured, so
+/// an inner enclosed only by the union of abutting outer rects, or an edge-projection
+/// corner case, can differ from a merged / projection-metric check.
+fn venc_violations(
+    rule: &crate::rules::Venc,
+    by_layer: &BTreeMap<i16, Vec<Rect>>,
+    out: &mut Vec<Violation>,
+) {
+    let Some(inners) = by_layer.get(&rule.inner) else { return };
+    let empty = Vec::new();
+    let outers = by_layer.get(&rule.outer).unwrap_or(&empty);
+    for inner in inners {
+        let mut contained = false;
+        let mut best_major: i64 = -1; // best major-margin on a minor-qualifying axis
+        for o in outers {
+            // does `o` fully contain `inner`?
+            if o.x0 <= inner.x0 && o.y0 <= inner.y0 && o.x1 >= inner.x1 && o.y1 >= inner.y1 {
+                contained = true;
+                let (l, r) = ((inner.x0 - o.x0) as i64, (o.x1 - inner.x1) as i64);
+                let (b, t) = ((inner.y0 - o.y0) as i64, (o.y1 - inner.y1) as i64);
+                // an axis "qualifies" when both its opposite margins meet `minor`; its
+                // contribution is then the larger of the two (the major side).
+                if l.min(r) >= rule.minor {
+                    best_major = best_major.max(l.max(r));
+                }
+                if b.min(t) >= rule.minor {
+                    best_major = best_major.max(b.max(t));
+                }
+            }
+        }
+        if best_major >= rule.major {
+            continue; // enclosed adequately on at least one axis
+        }
+        // value: best major achieved on a qualifying axis (≥0) if enclosed at all,
+        // else -1 (not enclosed by any single outer shape).
+        let value = if contained { best_major.max(0) } else { -1 };
+        out.push(Violation { rule: "venc", layer: rule.inner, limit: rule.major, value, a: *inner, b: None });
     }
 }
 
@@ -688,6 +740,31 @@ mod tests {
         // a cut with no metal under it -> skipped (not this rule's concern)
         let orphan = lib_with(vec![rect_elem(25, 5000, 5000, 5100, 5100)]);
         assert!(check_library(&orphan, None, &rules).unwrap().is_empty());
+    }
+
+    #[test]
+    fn venc_enclosure_satisfied_on_one_axis() {
+        // major=20, minor=8: a via is enclosed adequately if, on one axis, both sides
+        // are >=8 and at least one is >=20.
+        let rules = Rules::parse("venc 30 25 20 8\n").unwrap();
+
+        // via fills the wire height (y margins 0) but is deep inside along x -> the
+        // x-axis qualifies (100 & 1828), so it passes despite the 0 y-margins.
+        let ok = lib_with(vec![rect_elem(30, 0, 0, 2000, 136), rect_elem(25, 100, 0, 172, 136)]);
+        assert!(check_library(&ok, None, &rules).unwrap().is_empty());
+
+        // via inset only 4 dbu on every side of a small pad -> neither axis meets the
+        // minor on both sides -> violation, enclosed (value 0, not -1).
+        let bad = lib_with(vec![rect_elem(30, 0, 0, 100, 100), rect_elem(25, 4, 4, 96, 96)]);
+        let v = check_library(&bad, None, &rules).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!((v[0].rule, v[0].layer, v[0].limit, v[0].value), ("venc", 25, 20, 0));
+
+        // via not inside any single outer shape -> not enclosed sentinel (-1)
+        let orphan = lib_with(vec![rect_elem(30, 0, 0, 100, 100), rect_elem(25, 5000, 5000, 5100, 5100)]);
+        let v = check_library(&orphan, None, &rules).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].value, -1);
     }
 
     #[test]

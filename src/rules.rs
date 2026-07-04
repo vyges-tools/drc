@@ -58,6 +58,20 @@ pub struct Span {
     pub metal: i16,
 }
 
+/// An asymmetric via-enclosure rule: every `inner`-layer shape must be enclosed by a
+/// single `outer`-layer shape such that, on at least one axis, the enclosure on **both**
+/// opposite sides is ≥ `minor` and on **at least one** side is ≥ `major`. This is the
+/// generic advanced-node "via line-end / side" enclosure — a large enclosure along the
+/// routing direction and a small one across it, required on only one axis. An inner not
+/// enclosed by any single outer shape, or meeting the margins on neither axis, violates.
+#[derive(Debug, Clone, Copy)]
+pub struct Venc {
+    pub outer: i16,
+    pub inner: i16,
+    pub major: i64,
+    pub minor: i64,
+}
+
 /// A metal-fill rule (drives the `fill` generator, not the checker): top up
 /// `layer` coverage to at least `target_pct` per square `window`, by tiling
 /// `size`-square fill shapes that keep `gap` clearance from existing geometry.
@@ -89,6 +103,8 @@ pub struct Rules {
     pub enclosure: Vec<Enclosure>,
     /// via-span rules (a cut must span the full width of the metal it sits on).
     pub span: Vec<Span>,
+    /// asymmetric via-enclosure rules (inner enclosed by outer, satisfied on one axis).
+    pub venc: Vec<Venc>,
     /// metal-fill rules (consumed by the `fill` generator, not the checker).
     pub fill: Vec<Fill>,
 }
@@ -188,6 +204,19 @@ impl Rules {
                         .ok_or_else(|| err("span: expected `<cut_layer> <metal_layer>`"))?;
                     r.span.push(Span { cut: layer, metal });
                 }
+                "venc" => {
+                    // `venc <outer> <inner> <major> <minor>`
+                    let inner: i16 = toks
+                        .get(2)
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| err("venc: expected `<outer> <inner> <major> <minor>`"))?;
+                    let major = arg(1, "venc: expected an integer `<major>` (DB units)")?;
+                    let minor = arg(2, "venc: expected an integer `<minor>` (DB units)")?;
+                    if minor < 0 || major < minor {
+                        return Err(err("venc: need major ≥ minor ≥ 0"));
+                    }
+                    r.venc.push(Venc { outer: layer, inner, major, minor });
+                }
                 "fill" => {
                     // `fill <layer> <target_pct> <window> <size> <gap>`
                     let f = Fill {
@@ -215,6 +244,7 @@ impl Rules {
             && r.antenna.is_empty()
             && r.enclosure.is_empty()
             && r.span.is_empty()
+            && r.venc.is_empty()
             && r.fill.is_empty()
         {
             return Err(RulesError("no rules defined".into()));
@@ -277,6 +307,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_venc() {
+        let r = Rules::parse("venc 19 21 20 8\n").unwrap();
+        assert_eq!(r.venc.len(), 1);
+        let e = r.venc[0];
+        assert_eq!((e.outer, e.inner, e.major, e.minor), (19, 21, 20, 8));
+    }
+
+    #[test]
     fn rejects_garbage() {
         assert!(Rules::parse("width met1 170\n").is_err()); // non-numeric layer
         assert!(Rules::parse("# only comments\n").is_err()); // no rules
@@ -288,6 +326,8 @@ mod tests {
         assert!(Rules::parse("connect 66\n").is_err()); // connect needs two layers
         assert!(Rules::parse("enclosure 68 66\n").is_err()); // missing min
         assert!(Rules::parse("span 66\n").is_err()); // span needs two layers
+        assert!(Rules::parse("venc 19 21 20\n").is_err()); // venc needs major and minor
+        assert!(Rules::parse("venc 19 21 8 20\n").is_err()); // major must be >= minor
         assert!(Rules::parse("fill 68 30 1000 50\n").is_err()); // missing gap
         assert!(Rules::parse("fill 68 200 1000 50 60\n").is_err()); // target% > 100
         assert!(Rules::parse("fill 68 30 0 50 60\n").is_err()); // window 0

@@ -53,6 +53,9 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
             "enclosure" => format!("enclosure {} dbu < min {}", v.value, v.limit),
             // span: value is the total edge deviation from spanning the metal width
             "span" => format!("cut off metal-width by {} dbu (edges not coincident)", v.value),
+            // venc: value < 0 is the "not enclosed by a single outer" sentinel
+            "venc" if v.value < 0 => format!("not enclosed by a single outer (need {} on one axis)", v.limit),
+            "venc" => format!("enclosure {} dbu < required {} on any single axis", v.value, v.limit),
             // width / space: linear DB units, show µm too
             _ => format!("{} dbu ({:.4} µm) < min {}", v.value, um(v.value), v.limit),
         };
