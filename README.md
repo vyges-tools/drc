@@ -7,7 +7,7 @@ per-layer **rule deck** in, a list of **violations** out.
 > open standards and plain file formats — and meant to be accessible to everyone,
 > not only teams who can license a six-figure tool. `vyges-drc` opens up DRC.
 
-> **Stability: experimental (v0.1.5).** The fourteen rule classes below are real and
+> **Stability: experimental (v0.1.6).** The fourteen rule classes below are real and
 > tested, but this is an early engine — see **Current state** for exactly what is
 > and isn't covered. Treat it as an inner-loop checker, not tape-out sign-off.
 
@@ -77,7 +77,7 @@ fill       70     30 100000 600 400   # top layer 70 to 30% per window (600-fill
 The `fill` rule drives the **`fill` generator** (`vyges-drc fill … -o out.gds`), not
 the checker — the checker ignores it.
 
-## Current state (v0.1.5)
+## Current state (v0.1.6)
 
 **Working & tested:** fourteen rule classes plus a fill generator —
 
