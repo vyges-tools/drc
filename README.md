@@ -61,6 +61,7 @@ span       25     34              # every cut on 25 must span the full width of 
 venc       19     21 20 8         # via 21 enclosed by metal 19 by ≥20 on one axis (≥8 both sides)
 grid       40     1 96            # layer-40 vertices on a 96-dbu y-grid (x free)
 track      40     96 192 48       # 96-wide layer-40 wires centered on a 192-dbu track grid (offset 48)
+corner     19     21              # every via 21 corner must lie on the merged metal-19 boundary
 fill       70     30 100000 600 400   # top layer 70 to 30% per window (600-fill, 400-gap)
 ```
 
@@ -69,7 +70,7 @@ the checker — the checker ignores it.
 
 ## Current state (v0.1.2)
 
-**Working & tested:** ten rule classes plus a fill generator —
+**Working & tested:** eleven rule classes plus a fill generator —
 
 - **width** — a shape whose smaller dimension is below the layer minimum;
 - **spacing** — two distinct same-layer shapes closer than the minimum (run-length
@@ -84,19 +85,21 @@ the checker — the checker ignores it.
   net whose conductor-layer area exceeds `max_ratio ×` its connected gate-layer
   area (process-antenna / plasma-damage protection). The one rule class that needs
   connectivity, not just per-layer geometry;
-- **enclosure** — every `inner`-layer shape must sit inside an `outer`-layer shape
-  with at least `min` margin on all four sides (e.g. metal must enclose a via);
-  reports the worst margin, or "not enclosed" when no single outer contains it.
+- **enclosure** — every `inner`-layer shape must sit inside the **merged** `outer`-layer
+  region with at least `min` margin on all four sides (e.g. metal must enclose a via);
+  reports the worst margin, or "not enclosed" when the inner is not inside the outer.
+  Measured against the unioned outer polygons, so enclosure across abutting rectangles is
+  seen correctly and a bounding box does not fill in notches.
 - **span** — every `cut`-layer shape sitting on a `metal`-layer shape must span that
   metal's full width (its shorter dimension) with edges coincident on both sides;
   flags a cut that is narrower, shifted, or protruding past the metal edge. The
   generic form of an advanced-node "via lands on the full wire width" rule.
-- **venc** — asymmetric via enclosure: every `inner` shape must be enclosed by a single
-  `outer` shape so that, on **at least one axis**, both opposite margins are ≥ `minor`
-  and at least one is ≥ `major` (the generic advanced-node via **line-end / side**
+- **venc** — asymmetric via enclosure: every `inner` shape must be enclosed by the
+  **merged** `outer` region so that, on **at least one axis**, both opposite margins are ≥
+  `minor` and at least one is ≥ `major` (the generic advanced-node via **line-end / side**
   enclosure — a large enclosure along the routing direction, a small one across it, on
-  only one axis). Flags a via not enclosed by any single outer, or meeting the margins
-  on neither axis.
+  only one axis). Margins are projection enclosures against the merged outer geometry, so a
+  via flush against a landing pad flags and one enclosed across abutting rectangles does not.
 - **grid** — every layer vertex must lie on a manufacturing grid: a vertical edge's x a
   multiple of `xpitch`, a horizontal edge's y a multiple of `ypitch` (a pitch of 1 leaves
   that axis free). Collinear off-grid edges are merged first (a wire drawn as many rects
@@ -105,6 +108,10 @@ the checker — the checker ignores it.
   on the routing-track grid: its centerline, on the width axis, a multiple of `pitch`
   offset by `offset`. Collinear wire segments are merged first, so a wire drawn as many
   rects counts once. The generic advanced-node "min-width tracks lie on the routing grid" rule.
+- **corner** — every `inner` shape (a via) must match the **merged** `outer` (metal) outline
+  at its corners: a convex corner where **both** incident edges depart from the merged outer
+  boundary is flagged. The generic advanced-node "a via must be the metal width across the
+  routing direction" rule. Built on merged-boundary contour tracing and edge-set booleans.
 
 Plus the **`fill` generator** (`vyges-drc fill`): for each `fill` rule it tiles every
 window below the target with clearance-respecting fill shapes and writes a **filled
