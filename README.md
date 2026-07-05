@@ -163,10 +163,9 @@ GDS load + hierarchy **flatten** (via `vyges-layout`), text + `--json` reports, 
 - enclosure takes outer shapes **un-merged**, so an inner enclosed only by the
   *union* of two abutting outer rects reports as under-enclosed;
 - `fill` tiles the **design bounding box** (include a die/boundary layer for a sparse
-  layout), places fill on the rule's layer at **datatype 0** (a dedicated fill
-  datatype is a follow-up), and reaches the size/gap **geometric ceiling** rather
-  than exceeding it;
-- layers are keyed by **GDS number**; a named-layer mapping is a follow-up.
+  layout), places fill on the **rule's layer/datatype** (a dedicated fill datatype is a
+  follow-up), and reaches the size/gap **geometric ceiling** rather than exceeding it;
+- layers are keyed by **GDS number/datatype**; a symbolic named-layer mapping is a follow-up.
 
 **Validation roadmap:** correlate against **KLayout / Magic** golden DRC on open
 PDKs (sky130, gf180) — the same oracle-backed, golden-corpus discipline the rest
