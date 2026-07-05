@@ -94,6 +94,17 @@ pub struct Track {
     pub offset: i64,
 }
 
+/// A via-corner (edge-coincidence) rule: every `inner`-layer shape must have all of its
+/// corners lie on the merged `outer`-layer boundary — i.e. the via matches the metal
+/// outline. A corner where **both** incident edges depart from the merged outer boundary
+/// (a convex corner not backed by metal on either side) is flagged. This is the generic
+/// advanced-node "a via must match the metal width across the routing direction" rule.
+#[derive(Debug, Clone, Copy)]
+pub struct Corner {
+    pub outer: i16,
+    pub inner: i16,
+}
+
 /// A metal-fill rule (drives the `fill` generator, not the checker): top up
 /// `layer` coverage to at least `target_pct` per square `window`, by tiling
 /// `size`-square fill shapes that keep `gap` clearance from existing geometry.
@@ -131,6 +142,8 @@ pub struct Rules {
     pub grid: Vec<Grid>,
     /// routing-track rules (min-width wire centerlines must lie on the track grid).
     pub track: Vec<Track>,
+    /// via-corner rules (an inner shape's corners must lie on the merged outer boundary).
+    pub corner: Vec<Corner>,
     /// metal-fill rules (consumed by the `fill` generator, not the checker).
     pub fill: Vec<Fill>,
 }
@@ -262,6 +275,14 @@ impl Rules {
                     }
                     r.track.push(Track { layer, width, pitch, offset });
                 }
+                "corner" => {
+                    // `corner <outer_layer> <inner_layer>`
+                    let inner: i16 = toks
+                        .get(2)
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| err("corner: expected `<outer_layer> <inner_layer>`"))?;
+                    r.corner.push(Corner { outer: layer, inner });
+                }
                 "fill" => {
                     // `fill <layer> <target_pct> <window> <size> <gap>`
                     let f = Fill {
@@ -292,6 +313,7 @@ impl Rules {
             && r.venc.is_empty()
             && r.grid.is_empty()
             && r.track.is_empty()
+            && r.corner.is_empty()
             && r.fill.is_empty()
         {
             return Err(RulesError("no rules defined".into()));

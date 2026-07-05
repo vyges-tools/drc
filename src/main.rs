@@ -60,6 +60,8 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
             "grid" => "off-grid vertex".to_string(),
             // track: a min-width wire off the routing-track centerline grid
             "track" => "min-width wire off the routing-track centerline".to_string(),
+            // corner: a via corner not on the merged outer (metal) boundary
+            "corner" => "via corner departs the metal boundary on both edges".to_string(),
             // width / space: linear DB units, show µm too
             _ => format!("{} dbu ({:.4} µm) < min {}", v.value, um(v.value), v.limit),
         };

@@ -28,9 +28,11 @@
 //! pre-merged** (depth reserved). Non-Manhattan polygons fall back to their bounding box;
 //! touching/overlapping shapes are treated as connected (not a spacing violation).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::layout::boolean::{self, Op};
+use crate::layout::contour::trace_contours;
+use crate::layout::edges::{edges_not, ring_edges, Axis, Edge};
 use crate::layout::flatten;
 use crate::layout::geom::{self, Rect};
 use crate::layout::gds::{Element, Library};
@@ -39,7 +41,7 @@ use crate::rules::Rules;
 
 #[derive(Debug, Clone)]
 pub struct Violation {
-    pub rule: &'static str, // width|space|area|density|antenna|enclosure|span|venc|grid|track
+    pub rule: &'static str, // width|space|area|density|antenna|enclosure|span|venc|corner|grid|track
     pub layer: i16,
     /// The bound that was violated. DB units for width/space, DB units² for area,
     /// **percent** for density, and **centi-ratio** (ratio × 100) for antenna.
@@ -167,8 +169,13 @@ fn merged_outer_regions(
     rules: &Rules,
     polys_by_layer: &BTreeMap<i16, Vec<Vec<(i32, i32)>>>,
 ) -> BTreeMap<i16, Vec<Rect>> {
-    let outer_layers: BTreeSet<i16> =
-        rules.enclosure.iter().map(|r| r.outer).chain(rules.venc.iter().map(|r| r.outer)).collect();
+    let outer_layers: BTreeSet<i16> = rules
+        .enclosure
+        .iter()
+        .map(|r| r.outer)
+        .chain(rules.venc.iter().map(|r| r.outer))
+        .chain(rules.corner.iter().map(|r| r.outer))
+        .collect();
     let mut merged = BTreeMap::new();
     let empty = Vec::new();
     for l in outer_layers {
@@ -198,8 +205,13 @@ pub fn check_library(
 
     // True rectilinear polygons for the outer layers of enclosure/venc rules, unioned
     // into the merged region those checks measure against (bbox would fill notches).
-    let outer_layers: BTreeSet<i16> =
-        rules.enclosure.iter().map(|r| r.outer).chain(rules.venc.iter().map(|r| r.outer)).collect();
+    let outer_layers: BTreeSet<i16> = rules
+        .enclosure
+        .iter()
+        .map(|r| r.outer)
+        .chain(rules.venc.iter().map(|r| r.outer))
+        .chain(rules.corner.iter().map(|r| r.outer))
+        .collect();
     let mut polys_by_layer: BTreeMap<i16, Vec<Vec<(i32, i32)>>> = BTreeMap::new();
     if !outer_layers.is_empty() {
         for e in &cell.elements {
@@ -285,6 +297,21 @@ pub fn check_library(
         let inners = by_layer.get(&rule.inner).unwrap_or(&no_inner);
         let outer = merged_outer.get(&rule.outer).unwrap_or(&no_outer);
         venc_violations(rule, inners, outer, &mut viols);
+    }
+    // corner is cross-layer: an inner via's corners must lie on the merged outer boundary
+    for rule in &rules.corner {
+        let outer = merged_outer.get(&rule.outer).unwrap_or(&no_outer);
+        let edges = outer_boundary_edges(outer);
+        // de-duplicate coincident inner vias (merged semantics)
+        let mut seen = std::collections::HashSet::new();
+        let inners: Vec<Rect> = by_layer
+            .get(&rule.inner)
+            .unwrap_or(&no_inner)
+            .iter()
+            .copied()
+            .filter(|r| seen.insert((r.x0, r.y0, r.x1, r.y1)))
+            .collect();
+        corner_violations(rule.inner, &inners, &edges, &mut viols);
     }
     // grid is per-layer (vertices must lie on a manufacturing grid)
     for rule in &rules.grid {
@@ -458,6 +485,70 @@ fn venc_violations(
             out.push(Violation { rule: "venc", layer: rule.inner, limit: rule.major, value: best_major, a: *inner, b: None });
         }
     }
+}
+
+/// The four boundary edges of a via rectangle (direction is irrelevant to coincidence).
+fn via_edges(v: &Rect) -> [Edge; 4] {
+    [
+        Edge { a: (v.x0, v.y0), b: (v.x1, v.y0) },
+        Edge { a: (v.x1, v.y0), b: (v.x1, v.y1) },
+        Edge { a: (v.x1, v.y1), b: (v.x0, v.y1) },
+        Edge { a: (v.x0, v.y1), b: (v.x0, v.y0) },
+    ]
+}
+
+/// Supporting line of an axis-aligned edge: `(0, y)` horizontal or `(1, x)` vertical.
+fn edge_line(e: &Edge) -> (u8, i32) {
+    if e.a.1 == e.b.1 {
+        (0, e.a.1)
+    } else {
+        (1, e.a.0)
+    }
+}
+
+fn shares_endpoint(a: &Edge, b: &Edge) -> bool {
+    let ae = [a.a, a.b];
+    ae.contains(&b.a) || ae.contains(&b.b)
+}
+
+/// Via-corner check: an `inner` shape is flagged when it has a corner where **both**
+/// incident edges depart from the merged `outer` boundary — a convex corner not backed by
+/// metal on either side (the via fails to match the metal outline there). `outer_edges` are
+/// the merged outer boundary edges grouped by supporting line; `inners` are de-duplicated.
+fn corner_violations(
+    inner_layer: i16,
+    inners: &[Rect],
+    outer_edges: &HashMap<(u8, i32), Vec<Edge>>,
+    out: &mut Vec<Violation>,
+) {
+    for via in inners {
+        let mut local: Vec<Edge> = Vec::new();
+        for k in [(0, via.y0), (0, via.y1), (1, via.x0), (1, via.x1)] {
+            if let Some(es) = outer_edges.get(&k) {
+                local.extend_from_slice(es);
+            }
+        }
+        // portions of the via's edges that are NOT on the merged outer boundary
+        let nonc = edges_not(&via_edges(via), &local);
+        let nh: Vec<Edge> = nonc.iter().copied().filter(|e| e.axis() == Axis::Horizontal).collect();
+        let nv: Vec<Edge> = nonc.iter().copied().filter(|e| e.axis() == Axis::Vertical).collect();
+        // a convex corner where a non-coincident H edge meets a non-coincident V edge
+        if nh.iter().any(|h| nv.iter().any(|v| shares_endpoint(h, v))) {
+            out.push(Violation { rule: "corner", layer: inner_layer, limit: 0, value: 1, a: *via, b: None });
+        }
+    }
+}
+
+/// The merged outer boundary edges (from the merged region tiles), grouped by supporting
+/// line for per-via lookup.
+fn outer_boundary_edges(tiles: &[Rect]) -> HashMap<(u8, i32), Vec<Edge>> {
+    let mut by_line: HashMap<(u8, i32), Vec<Edge>> = HashMap::new();
+    for ring in trace_contours(tiles) {
+        for e in ring_edges(&ring) {
+            by_line.entry(edge_line(&e)).or_default().push(e);
+        }
+    }
+    by_line
 }
 
 /// Manufacturing-grid check: every layer vertex must lie on the grid — its x a multiple
@@ -1042,6 +1133,27 @@ mod tests {
         let v = check_library(&orphan, None, &rules).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].value, -1);
+    }
+
+    #[test]
+    fn corner_via_must_match_metal_width() {
+        // metal wire 100×20; a via spanning the full height sits on the top and bottom
+        // metal boundary — no corner departs the metal on both of its edges. Passes.
+        let ok = lib_with(vec![rect_elem(19, 0, 0, 100, 20), rect_elem(18, 40, 0, 60, 20)]);
+        assert!(check_library(&ok, None, &Rules::parse("corner 19 18\n").unwrap()).unwrap().is_empty());
+        // a via floating inside the metal (reaching no edge) — every corner departs the
+        // merged boundary on both edges. Flagged.
+        let bad = lib_with(vec![rect_elem(19, 0, 0, 100, 20), rect_elem(18, 40, 5, 60, 15)]);
+        let v = check_library(&bad, None, &Rules::parse("corner 19 18\n").unwrap()).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!((v[0].rule, v[0].layer), ("corner", 18));
+        // a via drawn twice (coincident) is de-duplicated → still one violation
+        let dup = lib_with(vec![
+            rect_elem(19, 0, 0, 100, 20),
+            rect_elem(18, 40, 5, 60, 15),
+            rect_elem(18, 40, 5, 60, 15),
+        ]);
+        assert_eq!(check_library(&dup, None, &Rules::parse("corner 19 18\n").unwrap()).unwrap().len(), 1);
     }
 
     #[test]
