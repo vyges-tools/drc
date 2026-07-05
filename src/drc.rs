@@ -163,8 +163,150 @@ fn side_margin(inner: &Rect, side: u8, region: &[Rect], idx: &RegionIndex, cap: 
     lo
 }
 
+/// Union-find for grouping touching tiles into connected components.
+struct Uf {
+    p: Vec<usize>,
+}
+impl Uf {
+    fn new(n: usize) -> Uf {
+        Uf { p: (0..n).collect() }
+    }
+    fn find(&mut self, mut x: usize) -> usize {
+        while self.p[x] != x {
+            self.p[x] = self.p[self.p[x]];
+            x = self.p[x];
+        }
+        x
+    }
+    fn union(&mut self, a: usize, b: usize) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            self.p[ra] = rb;
+        }
+    }
+}
+
+/// Component id per merged tile — tiles whose closed bounding boxes touch or overlap are one
+/// connected polygon. Distinct components are the distinct polygons `space` measures between.
+fn tile_components(tiles: &[Rect], tidx: &RegionIndex) -> Vec<usize> {
+    let mut uf = Uf::new(tiles.len());
+    for (i, r) in tiles.iter().enumerate() {
+        for j in tidx.overlaps(&r.inflate(1)) {
+            let j = j as usize;
+            if j != i {
+                let s = &tiles[j];
+                if r.x0 <= s.x1 && s.x0 <= r.x1 && r.y0 <= s.y1 && s.y0 <= r.y1 {
+                    uf.union(i, j);
+                }
+            }
+        }
+    }
+    (0..tiles.len()).map(|i| uf.find(i)).collect()
+}
+
+/// A point 1 dbu inside the solid, off the interior (left) side of a directed edge.
+fn interior_point(e: &Edge) -> (i32, i32) {
+    let dx = (e.b.0 - e.a.0).signum();
+    let dy = (e.b.1 - e.a.1).signum();
+    let mid = ((e.a.0 + e.b.0) / 2, (e.a.1 + e.b.1) / 2);
+    (mid.0 - dy, mid.1 + dx) // left normal (-dy, dx)
+}
+
+/// Component id of the tile containing a point (`usize::MAX` if none).
+fn point_component(p: (i32, i32), tiles: &[Rect], comp: &[usize], tidx: &RegionIndex) -> usize {
+    let q = Rect { x0: p.0, y0: p.1, x1: p.0, y1: p.1 };
+    for i in tidx.overlaps(&q) {
+        let r = &tiles[i as usize];
+        if r.x0 <= p.0 && p.0 <= r.x1 && r.y0 <= p.1 && p.1 <= r.y1 {
+            return comp[i as usize];
+        }
+    }
+    usize::MAX
+}
+
+/// Perpendicular gap and projection-overlap span of two parallel axis-aligned edges;
+/// `None` when they do not overlap in projection.
+fn perp_gap(ea: &Edge, eb: &Edge) -> Option<(i64, i32, i32, bool)> {
+    if ea.axis() == Axis::Horizontal {
+        let gap = (ea.a.1 - eb.a.1).abs() as i64;
+        let (a0, a1) = (ea.a.0.min(ea.b.0), ea.a.0.max(ea.b.0));
+        let (b0, b1) = (eb.a.0.min(eb.b.0), eb.a.0.max(eb.b.0));
+        let (lo, hi) = (a0.max(b0), a1.min(b1));
+        (lo < hi).then_some((gap, lo, hi, true))
+    } else {
+        let gap = (ea.a.0 - eb.a.0).abs() as i64;
+        let (a0, a1) = (ea.a.1.min(ea.b.1), ea.a.1.max(ea.b.1));
+        let (b0, b1) = (eb.a.1.min(eb.b.1), eb.a.1.max(eb.b.1));
+        let (lo, hi) = (a0.max(b0), a1.min(b1));
+        (lo < hi).then_some((gap, lo, hi, false))
+    }
+}
+
+/// Width and spacing on the **merged** boundary — the same check, differing only by whether
+/// the region between two parallel projection-overlapping edges is **solid** (`width`) or
+/// **empty** (`space`). Measured on the merged region, so a wire drawn as many rectangles is
+/// one wide shape (width) and same-wire geometry is never a gap (space), and non-rectangular
+/// shapes are handled by their true outline rather than a bounding box.
+fn edge_spacing_check(layer: i16, min_d: i64, tiles: &[Rect], want_solid: bool, rule: &'static str, out: &mut Vec<Violation>) {
+    let edges: Vec<Edge> = trace_contours(tiles).iter().flat_map(|r| ring_edges(r)).collect();
+    if edges.is_empty() {
+        return;
+    }
+    let tidx = RegionIndex::build(tiles);
+    let boxes: Vec<Rect> = edges.iter().map(bbox_edge).collect();
+    let eidx = RegionIndex::build(&boxes);
+    // `space` is between *distinct* polygons — label each edge by its interior component so
+    // two edges of the same wire (a notch or the wire's own width) never count as a gap.
+    let edge_comp: Vec<usize> = if want_solid {
+        Vec::new()
+    } else {
+        let tcomp = tile_components(tiles, &tidx);
+        edges.iter().map(|e| point_component(interior_point(e), tiles, &tcomp, &tidx)).collect()
+    };
+    let mut seen = std::collections::HashSet::new();
+    for i in 0..edges.len() {
+        for j in eidx.within(&boxes[i], min_d as i32, None) {
+            let j = j as usize;
+            if j <= i {
+                continue;
+            }
+            if !want_solid && edge_comp[i] == edge_comp[j] {
+                continue; // same polygon (notch / self) — not a spacing gap
+            }
+            let (ea, eb) = (&edges[i], &edges[j]);
+            if ea.axis() != eb.axis() {
+                continue;
+            }
+            let Some((gap, lo, hi, horizontal)) = perp_gap(ea, eb) else { continue };
+            if gap == 0 || gap >= min_d {
+                continue;
+            }
+            let (neck, mid) = if horizontal {
+                let (y0, y1) = (ea.a.1.min(eb.a.1), ea.a.1.max(eb.a.1));
+                (Rect { x0: lo, y0, x1: hi, y1 }, ((lo + hi) / 2, (y0 + y1) / 2))
+            } else {
+                let (x0, x1) = (ea.a.0.min(eb.a.0), ea.a.0.max(eb.a.0));
+                (Rect { x0, y0: lo, x1, y1: hi }, ((x0 + x1) / 2, (lo + hi) / 2))
+            };
+            if point_in_region(mid, tiles, &tidx) != want_solid {
+                continue;
+            }
+            let (na, nb) = (bbox_edge(ea), bbox_edge(eb));
+            let k = ((na.x0, na.y0, na.x1, na.y1), (nb.x0, nb.y0, nb.x1, nb.y1));
+            let k = if k.0 <= k.1 { k } else { (k.1, k.0) };
+            if !seen.insert(k) {
+                continue;
+            }
+            // width points at the narrow neck; space reports the two facing edges.
+            let (a, b) = if want_solid { (neck, None) } else { (na, Some(nb)) };
+            out.push(Violation { rule, layer, limit: min_d, value: gap, a, b });
+        }
+    }
+}
+
 /// Every layer that needs its true rectilinear polygons unioned into a merged region — the
-/// `outer` of enclosure/venc/corner rules and the `layer` of sep rules.
+/// `outer` of enclosure/venc/corner rules, the `layer` of sep/c2c/runlen rules, and any
+/// layer with a `width` rule (width is measured on the merged boundary).
 fn merged_layers(rules: &Rules) -> BTreeSet<i16> {
     rules
         .enclosure
@@ -175,6 +317,8 @@ fn merged_layers(rules: &Rules) -> BTreeSet<i16> {
         .chain(rules.sep.iter().map(|r| r.layer))
         .chain(rules.c2c.iter().map(|r| r.layer))
         .chain(rules.runlen.iter().map(|r| r.layer))
+        .chain(rules.width.keys().copied())
+        .chain(rules.space.keys().copied())
         .collect()
 }
 
@@ -375,41 +519,17 @@ pub fn check_library(
     let merged_outer = merged_regions(rules, &polys_by_layer);
 
     let mut viols = Vec::new();
+    let no_tiles = Vec::new();
     for (&layer, shapes) in &by_layer {
+        // width and spacing are both measured on the merged boundary (true outline): a wire
+        // drawn as many rectangles is one wide shape, and same-wire geometry is not a gap.
         if let Some(&min_w) = rules.width.get(&layer) {
-            for r in shapes {
-                let w = ((r.x1 - r.x0).min(r.y1 - r.y0)) as i64;
-                if w < min_w {
-                    viols.push(Violation { rule: "width", layer, limit: min_w, value: w, a: *r, b: None });
-                }
-            }
+            let tiles = merged_outer.get(&layer).unwrap_or(&no_tiles);
+            edge_spacing_check(layer, min_w, tiles, true, "width", &mut viols);
         }
         if let Some(&min_s) = rules.space.get(&layer) {
-            // Only shapes within `min_s` of one another can violate; a RegionIndex
-            // returns those candidates so this is near-linear instead of all-pairs.
-            // Each candidate is rechecked with the exact `spacing`, and `j > i` keeps
-            // every unordered pair reported once — identical results to all-pairs.
-            let idx = RegionIndex::build(shapes);
-            for i in 0..shapes.len() {
-                for jd in idx.within(&shapes[i], min_s as i32, Some(i as u32)) {
-                    let j = jd as usize;
-                    if j <= i {
-                        continue;
-                    }
-                    if let Some(s) = spacing(&shapes[i], &shapes[j]) {
-                        if s < min_s {
-                            viols.push(Violation {
-                                rule: "space",
-                                layer,
-                                limit: min_s,
-                                value: s,
-                                a: shapes[i],
-                                b: Some(shapes[j]),
-                            });
-                        }
-                    }
-                }
-            }
+            let tiles = merged_outer.get(&layer).unwrap_or(&no_tiles);
+            edge_spacing_check(layer, min_s, tiles, false, "space", &mut viols);
         }
         if let Some(&min_a) = rules.area.get(&layer) {
             for r in shapes {
@@ -1448,49 +1568,28 @@ mod tests {
     }
 
     #[test]
-    fn indexed_spacing_matches_brute_force_at_scale() {
-        // A deterministic field of shapes with varied gaps; the RegionIndex-backed
-        // spacing check must find exactly the same violations as an all-pairs scan.
-        let min_s = 50i64;
+    fn merged_geometry_ignores_same_wire() {
+        // A wire drawn as ten abutting 50×200 rectangles is one 500×200 merged shape: it is
+        // NOT a spacing violation against itself, and NOT a set of ten 50-wide slivers.
         let mut elems = Vec::new();
-        let mut shapes = Vec::new();
-        for gy in 0..24i32 {
-            for gx in 0..24i32 {
-                // pitch jitters so some neighbours are < min_s apart and some aren't
-                let x = gx * 80 + (gx * 13 + gy * 5) % 40;
-                let y = gy * 80 + (gy * 11 + gx * 7) % 40;
-                let r = Rect::new(x, y, x + 50, y + 50);
-                shapes.push(r);
-                elems.push(rect_elem(68, r.x0, r.y0, r.x1, r.y1));
-            }
+        for k in 0..10i32 {
+            elems.push(rect_elem(68, k * 50, 0, k * 50 + 50, 200));
         }
-        let lib = lib_with(elems);
-        let rules = Rules::parse(&format!("space 68 {min_s}\n")).unwrap();
+        let wire = lib_with(elems);
+        assert!(
+            check_library(&wire, None, &Rules::parse("space 68 100\n").unwrap()).unwrap().is_empty(),
+            "same-wire geometry is not a spacing gap"
+        );
+        assert!(
+            check_library(&wire, None, &Rules::parse("width 68 100\n").unwrap()).unwrap().is_empty(),
+            "the merged wire is 200 wide, not many 50-wide slivers"
+        );
 
-        // indexed result (rule=="space" pairs → comparable tuples)
-        let key = |r: &Rect| (r.x0, r.y0, r.x1, r.y1);
-        let mut got: Vec<_> = check_library(&lib, None, &rules)
-            .unwrap()
-            .into_iter()
-            .filter(|v| v.rule == "space")
-            .map(|v| (key(&v.a), key(&v.b.unwrap()), v.value))
-            .collect();
-
-        // brute-force reference (all-pairs)
-        let mut want = Vec::new();
-        for i in 0..shapes.len() {
-            for j in (i + 1)..shapes.len() {
-                if let Some(s) = spacing(&shapes[i], &shapes[j]) {
-                    if s < min_s {
-                        want.push((key(&shapes[i]), key(&shapes[j]), s));
-                    }
-                }
-            }
-        }
-        got.sort();
-        want.sort();
-        assert_eq!(got, want, "indexed spacing must equal all-pairs");
-        assert!(!want.is_empty(), "the fixture should actually contain violations");
+        // two separate wires 60 apart (< 100) -> exactly one spacing violation
+        let two = lib_with(vec![rect_elem(68, 0, 0, 100, 200), rect_elem(68, 160, 0, 260, 200)]);
+        let v = check_library(&two, None, &Rules::parse("space 68 100\n").unwrap()).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!((v[0].rule, v[0].value, v[0].limit), ("space", 60, 100));
     }
 
     #[test]
