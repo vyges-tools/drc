@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::layout::boolean::{self, Op};
 use crate::layout::contour::trace_contours;
-use crate::layout::edges::{edges_not, ring_edges, Axis, Edge};
+use crate::layout::edges::{edges_not, ring_edges, separation, Axis, Edge};
 use crate::layout::flatten;
 use crate::layout::geom::{self, Rect};
 use crate::layout::gds::{Element, Library};
@@ -41,7 +41,7 @@ use crate::rules::Rules;
 
 #[derive(Debug, Clone)]
 pub struct Violation {
-    pub rule: &'static str, // width|space|area|density|antenna|enclosure|span|venc|corner|grid|track
+    pub rule: &'static str, // width|space|area|density|antenna|enclosure|span|venc|corner|sep|grid|track
     pub layer: i16,
     /// The bound that was violated. DB units for width/space, DB units² for area,
     /// **percent** for density, and **centi-ratio** (ratio × 100) for antenna.
@@ -163,26 +163,83 @@ fn side_margin(inner: &Rect, side: u8, region: &[Rect], idx: &RegionIndex, cap: 
     lo
 }
 
-/// The merged region of each `outer` layer named by an enclosure/venc rule — the true
-/// rectilinear polygons unioned into tiles (notches preserved). Empty when no such rule.
-fn merged_outer_regions(
-    rules: &Rules,
-    polys_by_layer: &BTreeMap<i16, Vec<Vec<(i32, i32)>>>,
-) -> BTreeMap<i16, Vec<Rect>> {
-    let outer_layers: BTreeSet<i16> = rules
+/// Every layer that needs its true rectilinear polygons unioned into a merged region — the
+/// `outer` of enclosure/venc/corner rules and the `layer` of sep rules.
+fn merged_layers(rules: &Rules) -> BTreeSet<i16> {
+    rules
         .enclosure
         .iter()
         .map(|r| r.outer)
         .chain(rules.venc.iter().map(|r| r.outer))
         .chain(rules.corner.iter().map(|r| r.outer))
-        .collect();
+        .chain(rules.sep.iter().map(|r| r.layer))
+        .collect()
+}
+
+/// The merged region (unioned tiles) of each layer that needs one. Empty when none.
+fn merged_regions(
+    rules: &Rules,
+    polys_by_layer: &BTreeMap<i16, Vec<Vec<(i32, i32)>>>,
+) -> BTreeMap<i16, Vec<Rect>> {
     let mut merged = BTreeMap::new();
     let empty = Vec::new();
-    for l in outer_layers {
+    for l in merged_layers(rules) {
         let polys = polys_by_layer.get(&l).unwrap_or(&empty);
         merged.insert(l, boolean::boolean_poly(polys, &[], Op::Or));
     }
     merged
+}
+
+/// Perpendicular gap between two parallel axis-aligned edges (their separation distance).
+fn edge_gap(a: &Edge, b: &Edge) -> i64 {
+    if a.axis() == Axis::Horizontal {
+        (a.a.1 - b.a.1).abs() as i64
+    } else {
+        (a.a.0 - b.a.0).abs() as i64
+    }
+}
+
+/// Collapse (ea,eb) and (eb,ea) to one unordered pair — for same-class (space) spacing.
+fn dedup_edge_pairs(pairs: Vec<(Edge, Edge)>) -> Vec<(Edge, Edge)> {
+    let norm = |e: &Edge| (e.a.0.min(e.b.0), e.a.1.min(e.b.1), e.a.0.max(e.b.0), e.a.1.max(e.b.1));
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for p in pairs {
+        let (a, b) = (norm(&p.0), norm(&p.1));
+        let key = if a <= b { (a, b) } else { (b, a) };
+        if seen.insert(key) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Directional edge-spacing: on the merged boundary `edges`, an edge of length in the `a`
+/// class facing an edge of the `b` class closer than `dist` violates. Same class ⇒ space
+/// (dedup unordered pairs); different classes ⇒ separation.
+fn sep_violations(rule: &crate::rules::Sep, edges: &[Edge], out: &mut Vec<Violation>) {
+    let in_class = |e: &Edge, lo: i64, hi: i64| {
+        let l = e.len();
+        l >= lo && (hi == 0 || l <= hi)
+    };
+    let a: Vec<Edge> = edges.iter().copied().filter(|e| in_class(e, rule.a_min, rule.a_max)).collect();
+    let b: Vec<Edge> = edges.iter().copied().filter(|e| in_class(e, rule.b_min, rule.b_max)).collect();
+    let pairs = separation(&a, &b, rule.dist);
+    let pairs = if (rule.a_min, rule.a_max) == (rule.b_min, rule.b_max) { dedup_edge_pairs(pairs) } else { pairs };
+    for (ea, eb) in pairs {
+        out.push(Violation {
+            rule: "sep",
+            layer: rule.layer,
+            limit: rule.dist,
+            value: edge_gap(&ea, &eb),
+            a: bbox_edge(&ea),
+            b: Some(bbox_edge(&eb)),
+        });
+    }
+}
+
+fn bbox_edge(e: &Edge) -> Rect {
+    Rect { x0: e.a.0.min(e.b.0), y0: e.a.1.min(e.b.1), x1: e.a.0.max(e.b.0), y1: e.a.1.max(e.b.1) }
 }
 
 /// Run the rule deck over the flattened top cell of `lib`.
@@ -203,27 +260,22 @@ pub fn check_library(
         }
     }
 
-    // True rectilinear polygons for the outer layers of enclosure/venc rules, unioned
-    // into the merged region those checks measure against (bbox would fill notches).
-    let outer_layers: BTreeSet<i16> = rules
-        .enclosure
-        .iter()
-        .map(|r| r.outer)
-        .chain(rules.venc.iter().map(|r| r.outer))
-        .chain(rules.corner.iter().map(|r| r.outer))
-        .collect();
+    // True rectilinear polygons for every layer that needs a merged region (enclosure/venc/
+    // corner outer, sep layer), unioned so checks measure against real geometry (a bounding
+    // box would fill notches).
+    let want = merged_layers(rules);
     let mut polys_by_layer: BTreeMap<i16, Vec<Vec<(i32, i32)>>> = BTreeMap::new();
-    if !outer_layers.is_empty() {
+    if !want.is_empty() {
         for e in &cell.elements {
             let (layer, poly) = elem_poly(e);
-            if outer_layers.contains(&layer) {
+            if want.contains(&layer) {
                 if let Some(p) = poly {
                     polys_by_layer.entry(layer).or_default().push(p);
                 }
             }
         }
     }
-    let merged_outer = merged_outer_regions(rules, &polys_by_layer);
+    let merged_outer = merged_regions(rules, &polys_by_layer);
 
     let mut viols = Vec::new();
     for (&layer, shapes) in &by_layer {
@@ -312,6 +364,12 @@ pub fn check_library(
             .filter(|r| seen.insert((r.x0, r.y0, r.x1, r.y1)))
             .collect();
         corner_violations(rule.inner, &inners, &edges, &mut viols);
+    }
+    // sep is per-layer directional edge spacing on the merged boundary
+    for rule in &rules.sep {
+        let tiles = merged_outer.get(&rule.layer).unwrap_or(&no_outer);
+        let edges: Vec<Edge> = trace_contours(tiles).iter().flat_map(|r| ring_edges(r)).collect();
+        sep_violations(rule, &edges, &mut viols);
     }
     // grid is per-layer (vertices must lie on a manufacturing grid)
     for rule in &rules.grid {
@@ -1154,6 +1212,18 @@ mod tests {
             rect_elem(18, 40, 5, 60, 15),
         ]);
         assert_eq!(check_library(&dup, None, &Rules::parse("corner 19 18\n").unwrap()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sep_flags_facing_gap_and_dedups() {
+        // two squares 4 dbu apart on layer 19; same-class (self-)spacing within dist 5
+        // finds the single facing pair (A's right edge vs B's left edge), deduped.
+        let lib = lib_with(vec![rect_elem(19, 0, 0, 10, 10), rect_elem(19, 14, 0, 24, 10)]);
+        let v = check_library(&lib, None, &Rules::parse("sep 19 1 20 1 20 5\n").unwrap()).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!((v[0].rule, v[0].value, v[0].limit), ("sep", 4, 5));
+        // gap == dist is not a violation
+        assert!(check_library(&lib, None, &Rules::parse("sep 19 1 20 1 20 4\n").unwrap()).unwrap().is_empty());
     }
 
     #[test]

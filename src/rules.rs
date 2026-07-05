@@ -105,6 +105,22 @@ pub struct Corner {
     pub inner: i16,
 }
 
+/// A directional edge-spacing rule: on `layer`'s merged boundary, an edge of length in
+/// `[a_min, a_max]` that faces an edge of length in `[b_min, b_max]` across empty space,
+/// closer than `dist`, violates. An `_max` of `0` means unbounded. When the two length
+/// classes are identical it is same-layer (`space`) spacing; otherwise it is `separation`
+/// between two classes. This is the generic advanced-node tip-to-side / tip-to-tip family
+/// (classify boundary edges by length: tip / wide-tip / narrow-tip / side).
+#[derive(Debug, Clone, Copy)]
+pub struct Sep {
+    pub layer: i16,
+    pub a_min: i64,
+    pub a_max: i64,
+    pub b_min: i64,
+    pub b_max: i64,
+    pub dist: i64,
+}
+
 /// A metal-fill rule (drives the `fill` generator, not the checker): top up
 /// `layer` coverage to at least `target_pct` per square `window`, by tiling
 /// `size`-square fill shapes that keep `gap` clearance from existing geometry.
@@ -144,6 +160,8 @@ pub struct Rules {
     pub track: Vec<Track>,
     /// via-corner rules (an inner shape's corners must lie on the merged outer boundary).
     pub corner: Vec<Corner>,
+    /// directional edge-spacing rules (tip-to-side / tip-to-tip by edge length class).
+    pub sep: Vec<Sep>,
     /// metal-fill rules (consumed by the `fill` generator, not the checker).
     pub fill: Vec<Fill>,
 }
@@ -283,6 +301,22 @@ impl Rules {
                         .ok_or_else(|| err("corner: expected `<outer_layer> <inner_layer>`"))?;
                     r.corner.push(Corner { outer: layer, inner });
                 }
+                "sep" => {
+                    // `sep <layer> <a_min> <a_max> <b_min> <b_max> <dist>` (max 0 = unbounded)
+                    let e = || err("sep: expected `<layer> <a_min> <a_max> <b_min> <b_max> <dist>`");
+                    let s = Sep {
+                        layer,
+                        a_min: arg(0, "sep").map_err(|_| e())?,
+                        a_max: arg(1, "sep").map_err(|_| e())?,
+                        b_min: arg(2, "sep").map_err(|_| e())?,
+                        b_max: arg(3, "sep").map_err(|_| e())?,
+                        dist: arg(4, "sep").map_err(|_| e())?,
+                    };
+                    if s.dist <= 0 || s.a_min < 0 || s.b_min < 0 {
+                        return Err(err("sep: dist > 0 and lengths ≥ 0"));
+                    }
+                    r.sep.push(s);
+                }
                 "fill" => {
                     // `fill <layer> <target_pct> <window> <size> <gap>`
                     let f = Fill {
@@ -314,6 +348,7 @@ impl Rules {
             && r.grid.is_empty()
             && r.track.is_empty()
             && r.corner.is_empty()
+            && r.sep.is_empty()
             && r.fill.is_empty()
         {
             return Err(RulesError("no rules defined".into()));

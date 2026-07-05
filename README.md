@@ -62,6 +62,7 @@ venc       19     21 20 8         # via 21 enclosed by metal 19 by ≥20 on one 
 grid       40     1 96            # layer-40 vertices on a 96-dbu y-grid (x free)
 track      40     96 192 48       # 96-wide layer-40 wires centered on a 192-dbu track grid (offset 48)
 corner     19     21              # every via 21 corner must lie on the merged metal-19 boundary
+sep        19     1 143 145 0 100  # tip (edge ≤143) within 100 of a side (edge ≥145) on layer 19
 fill       70     30 100000 600 400   # top layer 70 to 30% per window (600-fill, 400-gap)
 ```
 
@@ -70,7 +71,7 @@ the checker — the checker ignores it.
 
 ## Current state (v0.1.2)
 
-**Working & tested:** eleven rule classes plus a fill generator —
+**Working & tested:** twelve rule classes plus a fill generator —
 
 - **width** — a shape whose smaller dimension is below the layer minimum;
 - **spacing** — two distinct same-layer shapes closer than the minimum (run-length
@@ -112,6 +113,12 @@ the checker — the checker ignores it.
   at its corners: a convex corner where **both** incident edges depart from the merged outer
   boundary is flagged. The generic advanced-node "a via must be the metal width across the
   routing direction" rule. Built on merged-boundary contour tracing and edge-set booleans.
+- **sep** — directional edge-to-edge spacing: on `layer`'s merged boundary, an edge of length
+  in `[a_min, a_max]` that **faces** an edge of length in `[b_min, b_max]` across empty space,
+  overlapping in projection and closer than `dist`, is flagged (`_max` of `0` = unbounded).
+  Classifying boundary edges by length gives the generic advanced-node **tip-to-side** and
+  **tip-to-tip** spacing family (tip / wide-tip / narrow-tip / side). Same length class on both
+  sides is same-layer spacing; different classes is separation between the two.
 
 Plus the **`fill` generator** (`vyges-drc fill`): for each `fill` rule it tiles every
 window below the target with clearance-respecting fill shapes and writes a **filled
