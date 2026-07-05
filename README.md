@@ -64,6 +64,7 @@ track      40     96 192 48       # 96-wide layer-40 wires centered on a 192-dbu
 corner     19     21              # every via 21 corner must lie on the merged metal-19 boundary
 sep        19     1 143 145 0 100  # tip (edge ≤143) within 100 of a side (edge ≥145) on layer 19
 c2c        19     80              # corner-to-corner spacing on layer 19 must be ≥ 80 dbu
+runlen     20     129 140         # parallel run at ≤129-dbu spacing must be ≥140 dbu long
 fill       70     30 100000 600 400   # top layer 70 to 30% per window (600-fill, 400-gap)
 ```
 
@@ -72,7 +73,7 @@ the checker — the checker ignores it.
 
 ## Current state (v0.1.2)
 
-**Working & tested:** thirteen rule classes plus a fill generator —
+**Working & tested:** fourteen rule classes plus a fill generator —
 
 - **width** — a shape whose smaller dimension is below the layer minimum;
 - **spacing** — two distinct same-layer shapes closer than the minimum (run-length
@@ -124,6 +125,10 @@ the checker — the checker ignores it.
   (their closest approach is at corners) that **face** each other across empty space closer than
   `dist` are flagged. This is the diagonal close-approach that side-to-side / tip spacing
   (projection-overlapping) does not cover — the generic "minimum corner-to-corner spacing" rule.
+- **runlen** — parallel-run-length: where two same-layer edges face across a gap closer than
+  `space`, the length of that parallel run (the merged gap's extent along the run) must be at
+  least `min_run`; a shorter run flags. The generic advanced-node "a short parallel run at tight
+  spacing is forbidden" rule, built on the gap polygons between facing edges.
 
 Plus the **`fill` generator** (`vyges-drc fill`): for each `fill` rule it tiles every
 window below the target with clearance-respecting fill shapes and writes a **filled

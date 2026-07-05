@@ -66,6 +66,8 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
             "sep" => format!("edge spacing {} dbu < min {}", v.value, v.limit),
             // c2c: corner-to-corner spacing
             "c2c" => format!("corner-to-corner {} dbu < min {}", v.value, v.limit),
+            // runlen: parallel run too short at tight spacing
+            "runlen" => format!("parallel run {} dbu < min {}", v.value, v.limit),
             // width / space: linear DB units, show µm too
             _ => format!("{} dbu ({:.4} µm) < min {}", v.value, um(v.value), v.limit),
         };

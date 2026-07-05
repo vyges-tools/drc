@@ -41,7 +41,7 @@ use crate::rules::Rules;
 
 #[derive(Debug, Clone)]
 pub struct Violation {
-    pub rule: &'static str, // width|space|area|density|antenna|enclosure|span|venc|corner|sep|c2c|grid|track
+    pub rule: &'static str, // width|space|area|density|antenna|enclosure|span|venc|corner|sep|c2c|runlen|grid|track
     pub layer: i16,
     /// The bound that was violated. DB units for width/space, DB units² for area,
     /// **percent** for density, and **centi-ratio** (ratio × 100) for antenna.
@@ -174,6 +174,7 @@ fn merged_layers(rules: &Rules) -> BTreeSet<i16> {
         .chain(rules.corner.iter().map(|r| r.outer))
         .chain(rules.sep.iter().map(|r| r.layer))
         .chain(rules.c2c.iter().map(|r| r.layer))
+        .chain(rules.runlen.iter().map(|r| r.layer))
         .collect()
 }
 
@@ -473,6 +474,12 @@ pub fn check_library(
         let edges: Vec<Edge> = trace_contours(tiles).iter().flat_map(|r| ring_edges(r)).collect();
         c2c_violations(rule, &edges, tiles, &mut viols);
     }
+    // runlen is per-layer parallel-run-length on the merged boundary
+    for rule in &rules.runlen {
+        let tiles = merged_outer.get(&rule.layer).unwrap_or(&no_outer);
+        let edges: Vec<Edge> = trace_contours(tiles).iter().flat_map(|r| ring_edges(r)).collect();
+        runlen_violations(rule, &edges, &mut viols);
+    }
     // grid is per-layer (vertices must lie on a manufacturing grid)
     for rule in &rules.grid {
         if let Some(shapes) = by_layer.get(&rule.layer) {
@@ -709,6 +716,62 @@ fn outer_boundary_edges(tiles: &[Rect]) -> HashMap<(u8, i32), Vec<Edge>> {
         }
     }
     by_line
+}
+
+/// The empty gap rectangle between two facing parallel edges (their space polygon).
+fn gap_rect(a: &Edge, b: &Edge, horizontal: bool) -> Rect {
+    if horizontal {
+        let xl = a.a.0.min(a.b.0).max(b.a.0.min(b.b.0));
+        let xr = a.a.0.max(a.b.0).min(b.a.0.max(b.b.0));
+        Rect { x0: xl, y0: a.a.1.min(b.a.1), x1: xr, y1: a.a.1.max(b.a.1) }
+    } else {
+        let yl = a.a.1.min(a.b.1).max(b.a.1.min(b.b.1));
+        let yr = a.a.1.max(a.b.1).min(b.a.1.max(b.b.1));
+        Rect { x0: a.a.0.min(b.a.0), y0: yl, x1: a.a.0.max(b.a.0), y1: yr }
+    }
+}
+
+fn ring_area2(ring: &[(i32, i32)]) -> i64 {
+    (0..ring.len().saturating_sub(1))
+        .map(|i| ring[i].0 as i64 * ring[i + 1].1 as i64 - ring[i + 1].0 as i64 * ring[i].1 as i64)
+        .sum()
+}
+
+fn ring_bbox(ring: &[(i32, i32)]) -> Rect {
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for &(x, y) in ring {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
+    }
+    Rect { x0, y0, x1, y1 }
+}
+
+/// Parallel-run-length: where same-layer edges face across a gap < `space`, the merged
+/// run's extent along the run direction must be ≥ `min_run`; shorter runs violate. Done
+/// per orientation (horizontal-edge gaps run in x, vertical-edge gaps in y): build the gap
+/// rectangles, merge them, and flag each merged run shorter than `min_run`.
+fn runlen_violations(rule: &crate::rules::RunLen, edges: &[Edge], out: &mut Vec<Violation>) {
+    for horizontal in [true, false] {
+        let cls: Vec<Edge> =
+            edges.iter().copied().filter(|e| (e.axis() == Axis::Horizontal) == horizontal).collect();
+        let gaps: Vec<Vec<(i32, i32)>> = separation(&cls, &cls, rule.space)
+            .iter()
+            .map(|(a, b)| gap_rect(a, b, horizontal).as_boundary())
+            .collect();
+        let tiles = boolean::boolean_poly(&gaps, &[], Op::Or);
+        for ring in trace_contours(&tiles) {
+            if ring_area2(&ring) <= 0 {
+                continue; // outer rings are the runs
+            }
+            let bb = ring_bbox(&ring);
+            let run = (if horizontal { bb.x1 - bb.x0 } else { bb.y1 - bb.y0 }) as i64;
+            if run < rule.min_run {
+                out.push(Violation { rule: "runlen", layer: rule.layer, limit: rule.min_run, value: run, a: bb, b: None });
+            }
+        }
+    }
 }
 
 /// Manufacturing-grid check: every layer vertex must lie on the grid — its x a multiple
@@ -1338,6 +1401,17 @@ mod tests {
         assert!(v.iter().all(|x| x.rule == "c2c"));
         // dist 5 < 5.66: clean
         assert!(check_library(&lib, None, &Rules::parse("c2c 19 5\n").unwrap()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn runlen_flags_short_parallel_run() {
+        // two wide wires 4 dbu apart vertically; the parallel run (width 20) is short
+        let lib = lib_with(vec![rect_elem(19, 0, 0, 20, 10), rect_elem(19, 0, 14, 20, 24)]);
+        let v = check_library(&lib, None, &Rules::parse("runlen 19 6 30\n").unwrap()).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!((v[0].rule, v[0].value, v[0].limit), ("runlen", 20, 30));
+        // run 20 ≥ min_run 15: clean
+        assert!(check_library(&lib, None, &Rules::parse("runlen 19 6 15\n").unwrap()).unwrap().is_empty());
     }
 
     #[test]
