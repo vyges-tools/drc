@@ -45,13 +45,17 @@ vyges-drc demo                                          # built-in layout with v
 # flags: --rules DECK · --top CELL · -o FILE · --json · --fail-on-violation · -h · -V
 ```
 
-A rule deck keys on the **GDS layer number**; each rule takes its own arguments in
-DB units (`#` starts a comment):
+A rule deck keys on a **GDS layer**, written `number/datatype` (a bare `number` means
+datatype `0`); each rule takes its own arguments in DB units (`#` starts a comment).
+Qualifying the datatype matters on real PDKs, where different physical layers share a
+GDS layer number — sky130 packs drawn poly on `66/20` and the licon1 contact on `66/44`,
+so `space 66 …` (datatype-blind) would union them and flag the contact-to-poly gaps.
 
 ```text
-# rule     layer  args
-width      66     170             # min width on layer 66
-space      68     140             # min spacing on layer 68
+# rule     layer   args
+width      66/20   150             # min width on drawn poly (66/20)
+space      66/20   210             # min spacing on drawn poly
+width      68      170             # bare layer == datatype 0
 area       68     20000           # min polygon area (dbu²) on layer 68
 density    68     20 70 100000    # coverage on 68 must be 20–70% per 100000-dbu window
 connect    5      68              # layers 5 & 68 connect where they overlap (via/contact)

@@ -37,7 +37,7 @@ use crate::layout::flatten;
 use crate::layout::geom::{self, Rect};
 use crate::layout::gds::{Element, Library};
 use crate::layout::index::RegionIndex;
-use crate::rules::Rules;
+use crate::rules::{Layer, Rules};
 
 #[derive(Debug, Clone)]
 pub struct Violation {
@@ -90,13 +90,13 @@ fn pick_top(lib: &Library, top: Option<&str>) -> Result<String, String> {
 
 /// A measurable element's `(layer, rect)` — a rectangle where possible, else the
 /// bounding box; `None` for elements we don't measure (Path/Text).
-fn elem_rect(e: &Element) -> (i16, Option<Rect>) {
-    match e {
-        Element::Boundary { layer, pts, .. } | Element::Box { layer, pts, .. } => {
-            (*layer, Rect::from_boundary(pts).or_else(|| geom::bbox(pts)))
-        }
-        _ => (0, None),
-    }
+fn elem_rect(e: &Element) -> (Layer, Option<Rect>) {
+    let (num, dt, pts) = match e {
+        Element::Boundary { layer, datatype, pts } => (*layer, *datatype, pts),
+        Element::Box { layer, boxtype, pts } => (*layer, *boxtype, pts),
+        _ => return (Layer::new(0, 0), None),
+    };
+    (Layer::new(num, dt), Rect::from_boundary(pts).or_else(|| geom::bbox(pts)))
 }
 
 /// Every edge of a closed polygon is axis-aligned.
@@ -113,17 +113,14 @@ fn is_manhattan(pts: &[(i32, i32)]) -> bool {
 /// preserved), or the bounding box only for a genuinely non-Manhattan shape. Unlike
 /// `elem_rect`, a rectilinear L/notched polygon is kept whole rather than collapsed to its
 /// bbox, so unioning these gives the real merged geometry (enclosure needs this).
-fn elem_poly(e: &Element) -> (i16, Option<Vec<(i32, i32)>>) {
-    match e {
-        Element::Boundary { layer, pts, .. } | Element::Box { layer, pts, .. } => {
-            if is_manhattan(pts) {
-                (*layer, Some(pts.clone()))
-            } else {
-                (*layer, geom::bbox(pts).map(|b| b.as_boundary()))
-            }
-        }
-        _ => (0, None),
-    }
+fn elem_poly(e: &Element) -> (Layer, Option<Vec<(i32, i32)>>) {
+    let (num, dt, pts) = match e {
+        Element::Boundary { layer, datatype, pts } => (*layer, *datatype, pts),
+        Element::Box { layer, boxtype, pts } => (*layer, *boxtype, pts),
+        _ => return (Layer::new(0, 0), None),
+    };
+    let poly = if is_manhattan(pts) { Some(pts.clone()) } else { geom::bbox(pts).map(|b| b.as_boundary()) };
+    (Layer::new(num, dt), poly)
 }
 
 /// Is `q` fully covered by the union of `region` (merged tiles)? Exact: AND `q` with the
@@ -307,7 +304,7 @@ fn edge_spacing_check(layer: i16, min_d: i64, tiles: &[Rect], want_solid: bool, 
 /// Every layer that needs its true rectilinear polygons unioned into a merged region — the
 /// `outer` of enclosure/venc/corner rules, the `layer` of sep/c2c/runlen rules, and any
 /// layer with a `width` rule (width is measured on the merged boundary).
-fn merged_layers(rules: &Rules) -> BTreeSet<i16> {
+fn merged_layers(rules: &Rules) -> BTreeSet<Layer> {
     rules
         .enclosure
         .iter()
@@ -325,8 +322,8 @@ fn merged_layers(rules: &Rules) -> BTreeSet<i16> {
 /// The merged region (unioned tiles) of each layer that needs one. Empty when none.
 fn merged_regions(
     rules: &Rules,
-    polys_by_layer: &BTreeMap<i16, Vec<Vec<(i32, i32)>>>,
-) -> BTreeMap<i16, Vec<Rect>> {
+    polys_by_layer: &BTreeMap<Layer, Vec<Vec<(i32, i32)>>>,
+) -> BTreeMap<Layer, Vec<Rect>> {
     let mut merged = BTreeMap::new();
     let empty = Vec::new();
     for l in merged_layers(rules) {
@@ -375,7 +372,7 @@ fn sep_violations(rule: &crate::rules::Sep, edges: &[Edge], out: &mut Vec<Violat
     for (ea, eb) in pairs {
         out.push(Violation {
             rule: "sep",
-            layer: rule.layer,
+            layer: rule.layer.num,
             limit: rule.dist,
             value: edge_gap(&ea, &eb),
             a: bbox_edge(&ea),
@@ -473,7 +470,7 @@ fn c2c_violations(rule: &crate::rules::C2c, edges: &[Edge], tiles: &[Rect], out:
             }
             out.push(Violation {
                 rule: "c2c",
-                layer: rule.layer,
+                layer: rule.layer.num,
                 limit: rule.dist,
                 value: (ds as f64).sqrt() as i64,
                 a: na,
@@ -493,7 +490,7 @@ pub fn check_library(
     let cell = flatten::flatten(lib, &top)?;
 
     // shapes per layer (rectangles where possible; bbox for non-Manhattan)
-    let mut by_layer: BTreeMap<i16, Vec<Rect>> = BTreeMap::new();
+    let mut by_layer: BTreeMap<Layer, Vec<Rect>> = BTreeMap::new();
     for e in &cell.elements {
         let (layer, rect) = elem_rect(e);
         if let Some(r) = rect {
@@ -505,7 +502,7 @@ pub fn check_library(
     // corner outer, sep layer), unioned so checks measure against real geometry (a bounding
     // box would fill notches).
     let want = merged_layers(rules);
-    let mut polys_by_layer: BTreeMap<i16, Vec<Vec<(i32, i32)>>> = BTreeMap::new();
+    let mut polys_by_layer: BTreeMap<Layer, Vec<Vec<(i32, i32)>>> = BTreeMap::new();
     if !want.is_empty() {
         for e in &cell.elements {
             let (layer, poly) = elem_poly(e);
@@ -525,27 +522,27 @@ pub fn check_library(
         // drawn as many rectangles is one wide shape, and same-wire geometry is not a gap.
         if let Some(&min_w) = rules.width.get(&layer) {
             let tiles = merged_outer.get(&layer).unwrap_or(&no_tiles);
-            edge_spacing_check(layer, min_w, tiles, true, "width", &mut viols);
+            edge_spacing_check(layer.num, min_w, tiles, true, "width", &mut viols);
         }
         if let Some(&min_s) = rules.space.get(&layer) {
             let tiles = merged_outer.get(&layer).unwrap_or(&no_tiles);
-            edge_spacing_check(layer, min_s, tiles, false, "space", &mut viols);
+            edge_spacing_check(layer.num, min_s, tiles, false, "space", &mut viols);
         }
         if let Some(&min_a) = rules.area.get(&layer) {
             for r in shapes {
                 let area = (r.x1 - r.x0) as i64 * (r.y1 - r.y0) as i64;
                 if area < min_a {
-                    viols.push(Violation { rule: "area", layer, limit: min_a, value: area, a: *r, b: None });
+                    viols.push(Violation { rule: "area", layer: layer.num, limit: min_a, value: area, a: *r, b: None });
                 }
             }
         }
         if let Some(d) = rules.density.get(&layer) {
-            density_violations(layer, shapes, *d, &mut viols);
+            density_violations(layer.num, shapes, *d, &mut viols);
         }
     }
     // antenna is a per-net (connectivity) check — needs all layers together
     if !rules.antenna.is_empty() {
-        let all: Vec<(i16, Rect)> =
+        let all: Vec<(Layer, Rect)> =
             by_layer.iter().flat_map(|(&l, shapes)| shapes.iter().map(move |r| (l, *r))).collect();
         antenna_violations(&all, &rules.connect, &rules.antenna, &mut viols);
     }
@@ -580,7 +577,7 @@ pub fn check_library(
             .copied()
             .filter(|r| seen.insert((r.x0, r.y0, r.x1, r.y1)))
             .collect();
-        corner_violations(rule.inner, &inners, &edges, &mut viols);
+        corner_violations(rule.inner.num, &inners, &edges, &mut viols);
     }
     // sep is per-layer directional edge spacing on the merged boundary
     for rule in &rules.sep {
@@ -674,13 +671,13 @@ fn enclosure_violations(
     for inner in inners {
         // `inner` must sit inside the merged outer region; else the not-enclosed sentinel.
         if !covered(inner, outer, &idx) {
-            out.push(Violation { rule: "enclosure", layer: rule.inner, limit: rule.min, value: -1, a: *inner, b: None });
+            out.push(Violation { rule: "enclosure", layer: rule.inner.num, limit: rule.min, value: -1, a: *inner, b: None });
             continue;
         }
         // min enclosure over the four sides (capped at `min`; adequate ⇒ no violation).
         let m = (0..4).map(|s| side_margin(inner, s, outer, &idx, rule.min)).min().unwrap_or(0);
         if m < rule.min {
-            out.push(Violation { rule: "enclosure", layer: rule.inner, limit: rule.min, value: m, a: *inner, b: None });
+            out.push(Violation { rule: "enclosure", layer: rule.inner.num, limit: rule.min, value: m, a: *inner, b: None });
         }
     }
 }
@@ -697,7 +694,7 @@ fn enclosure_violations(
 /// x-axis by convention.
 fn span_violations(
     rule: &crate::rules::Span,
-    by_layer: &BTreeMap<i16, Vec<Rect>>,
+    by_layer: &BTreeMap<Layer, Vec<Rect>>,
     out: &mut Vec<Violation>,
 ) {
     let Some(cuts) = by_layer.get(&rule.cut) else { return };
@@ -720,7 +717,7 @@ fn span_violations(
             (cut.y0 - m.y0).abs() as i64 + (cut.y1 - m.y1).abs() as i64
         };
         if dev > 0 {
-            out.push(Violation { rule: "span", layer: rule.cut, limit: 0, value: dev, a: *cut, b: Some(*m) });
+            out.push(Violation { rule: "span", layer: rule.cut.num, limit: 0, value: dev, a: *cut, b: Some(*m) });
         }
     }
 }
@@ -751,7 +748,7 @@ fn venc_violations(
     let idx = RegionIndex::build(outer);
     for inner in inners {
         if !covered(inner, outer, &idx) {
-            out.push(Violation { rule: "venc", layer: rule.inner, limit: rule.major, value: -1, a: *inner, b: None });
+            out.push(Violation { rule: "venc", layer: rule.inner.num, limit: rule.major, value: -1, a: *inner, b: None });
             continue;
         }
         // per-side enclosure against the merged outer region (capped at `major`).
@@ -769,7 +766,7 @@ fn venc_violations(
             best_major = best_major.max(b.max(t));
         }
         if best_major < rule.major {
-            out.push(Violation { rule: "venc", layer: rule.inner, limit: rule.major, value: best_major, a: *inner, b: None });
+            out.push(Violation { rule: "venc", layer: rule.inner.num, limit: rule.major, value: best_major, a: *inner, b: None });
         }
     }
 }
@@ -888,7 +885,7 @@ fn runlen_violations(rule: &crate::rules::RunLen, edges: &[Edge], out: &mut Vec<
             let bb = ring_bbox(&ring);
             let run = (if horizontal { bb.x1 - bb.x0 } else { bb.y1 - bb.y0 }) as i64;
             if run < rule.min_run {
-                out.push(Violation { rule: "runlen", layer: rule.layer, limit: rule.min_run, value: run, a: bb, b: None });
+                out.push(Violation { rule: "runlen", layer: rule.layer.num, limit: rule.min_run, value: run, a: bb, b: None });
             }
         }
     }
@@ -923,7 +920,7 @@ fn grid_violations(rule: &crate::rules::Grid, shapes: &[Rect], out: &mut Vec<Vio
     merged_edge_endpoints(true, vert, &mut pts);
     merged_edge_endpoints(false, horiz, &mut pts);
     for (x, y) in pts {
-        out.push(Violation { rule: "grid", layer: rule.layer, limit: 0, value: 0, a: Rect::new(x, y, x, y), b: None });
+        out.push(Violation { rule: "grid", layer: rule.layer.num, limit: 0, value: 0, a: Rect::new(x, y, x, y), b: None });
     }
 }
 
@@ -962,8 +959,8 @@ fn track_violations(rule: &crate::rules::Track, shapes: &[Rect], out: &mut Vec<V
         }
     }
     let half = (rule.width / 2) as i32;
-    emit_merged_track(true, horiz, half, rule.layer, out);
-    emit_merged_track(false, vert, half, rule.layer, out);
+    emit_merged_track(true, horiz, half, rule.layer.num, out);
+    emit_merged_track(false, vert, half, rule.layer.num, out);
 }
 
 /// Merge collinear abutting/overlapping wire spans per centerline and emit one `track`
@@ -1059,7 +1056,7 @@ pub fn fill_library(lib: &Library, top: Option<&str>, rules: &Rules) -> Result<(
     let top = pick_top(lib, top)?;
     let cell = flatten::flatten(lib, &top)?;
 
-    let mut by_layer: BTreeMap<i16, Vec<Rect>> = BTreeMap::new();
+    let mut by_layer: BTreeMap<Layer, Vec<Rect>> = BTreeMap::new();
     let mut all: Vec<Rect> = Vec::new();
     for e in &cell.elements {
         if let (layer, Some(r)) = elem_rect(e) {
@@ -1078,7 +1075,7 @@ pub fn fill_library(lib: &Library, top: Option<&str>, rules: &Rules) -> Result<(
         let existing = by_layer.get(&rule.layer).unwrap_or(&empty);
         let placed = fill_region(rule, &region, existing);
         for r in &placed {
-            new_elems.push(Element::Boundary { layer: rule.layer, datatype: 0, pts: r.as_boundary() });
+            new_elems.push(Element::Boundary { layer: rule.layer.num, datatype: rule.layer.dt, pts: r.as_boundary() });
         }
     }
 
@@ -1169,13 +1166,13 @@ impl UnionFind {
 /// cumulative per-metal-layer charge model), and a net with conductor but no gate
 /// is treated as not-applicable rather than flagged.
 fn antenna_violations(
-    all: &[(i16, Rect)],
-    connect: &[(i16, i16)],
+    all: &[(Layer, Rect)],
+    connect: &[(Layer, Layer)],
     rules: &[crate::rules::Antenna],
     out: &mut Vec<Violation>,
 ) {
     let n = all.len();
-    let connects = |la: i16, lb: i16| -> bool {
+    let connects = |la: Layer, lb: Layer| -> bool {
         la == lb || connect.iter().any(|&(x, y)| (x == la && y == lb) || (x == lb && y == la))
     };
     // Connectivity only unions shapes that touch/overlap; a RegionIndex over all
@@ -1221,7 +1218,7 @@ fn antenna_violations(
                 let net_bbox = bbox(&cond).unwrap_or(all[idxs[0]].1);
                 out.push(Violation {
                     rule: "antenna",
-                    layer: rule.conductor,
+                    layer: rule.conductor.num,
                     // value / limit carried as centi-ratio (×100) — the report divides.
                     value: (ratio * 100.0).round() as i64,
                     limit: (rule.max_ratio * 100.0).round() as i64,
@@ -1550,7 +1547,7 @@ mod tests {
                 .unwrap()
                 .elements
                 .iter()
-                .filter_map(|e| if elem_rect(e).0 == 68 { elem_rect(e).1 } else { None })
+                .filter_map(|e| if elem_rect(e).0 == Layer::new(68, 0) { elem_rect(e).1 } else { None })
                 .map(|r| overlap_area(&r, &die))
                 .sum()
         };
@@ -1559,8 +1556,8 @@ mod tests {
         // every fill shape clears the original metal by the gap
         let orig = Rect::new(0, 0, 100, 100);
         for e in &filled.cells[0].elements {
-            if let (68, Some(r)) = elem_rect(e) {
-                if r != orig {
+            if let (l, Some(r)) = elem_rect(e) {
+                if l == Layer::new(68, 0) && r != orig {
                     assert!(keeps_gap(&r, &orig, 50), "fill {r:?} too close to existing");
                 }
             }

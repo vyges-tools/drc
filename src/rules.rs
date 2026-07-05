@@ -12,11 +12,41 @@
 //! density   68     20 70 100000    # metal coverage on 68 must be 20–70% per 100000-dbu window
 //! ```
 //!
-//! Layer **names** (a `layer <name> <num>` mapping) and datatype qualification are
-//! depth items; v0 keys on the raw GDS layer number, which is unambiguous and PDK-
-//! independent.
+//! A layer is a **GDS layer/datatype** pair, written `num/datatype` (e.g. `66/20`
+//! for sky130 drawn poly). A bare `num` means datatype `0`. This qualification is
+//! required on real PDKs: different physical layers share a GDS layer number and are
+//! told apart only by datatype (sky130 packs drawn poly `66/20` and the licon1
+//! contact `66/44` onto layer 66), so a datatype-blind check would union them.
 
 use std::collections::BTreeMap;
+
+/// A GDS layer, identified by number **and** datatype. `dt` defaults to 0 for a bare
+/// layer number in the deck. Ordered/hashable so it can key the per-layer shape maps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Layer {
+    pub num: i16,
+    pub dt: i16,
+}
+
+impl Layer {
+    pub fn new(num: i16, dt: i16) -> Layer {
+        Layer { num, dt }
+    }
+
+    /// Parse a deck layer token: `"66/20"` → `66/20`, bare `"66"` → `66/0`.
+    pub fn parse(s: &str) -> Option<Layer> {
+        match s.split_once('/') {
+            Some((n, d)) => Some(Layer { num: n.trim().parse().ok()?, dt: d.trim().parse().ok()? }),
+            None => Some(Layer { num: s.trim().parse().ok()?, dt: 0 }),
+        }
+    }
+}
+
+impl std::fmt::Display for Layer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.num, self.dt)
+    }
+}
 
 /// A windowed-density rule: coverage on the layer must stay within `min..=max`
 /// percent, measured per square `window`-DB-unit tile.
@@ -32,8 +62,8 @@ pub struct Density {
 /// protection). Checked per extracted net, so it needs connectivity (`connect`).
 #[derive(Debug, Clone, Copy)]
 pub struct Antenna {
-    pub conductor: i16,
-    pub gate: i16,
+    pub conductor: Layer,
+    pub gate: Layer,
     pub max_ratio: f64,
 }
 
@@ -42,8 +72,8 @@ pub struct Antenna {
 /// enclose a via/cut).
 #[derive(Debug, Clone, Copy)]
 pub struct Enclosure {
-    pub outer: i16,
-    pub inner: i16,
+    pub outer: Layer,
+    pub inner: Layer,
     pub min: i64,
 }
 
@@ -54,8 +84,8 @@ pub struct Enclosure {
 /// width" rule.
 #[derive(Debug, Clone, Copy)]
 pub struct Span {
-    pub cut: i16,
-    pub metal: i16,
+    pub cut: Layer,
+    pub metal: Layer,
 }
 
 /// An asymmetric via-enclosure rule: every `inner`-layer shape must be enclosed by a
@@ -66,8 +96,8 @@ pub struct Span {
 /// enclosed by any single outer shape, or meeting the margins on neither axis, violates.
 #[derive(Debug, Clone, Copy)]
 pub struct Venc {
-    pub outer: i16,
-    pub inner: i16,
+    pub outer: Layer,
+    pub inner: Layer,
     pub major: i64,
     pub minor: i64,
 }
@@ -77,7 +107,7 @@ pub struct Venc {
 /// leaves that axis unconstrained. Flags each distinct off-grid vertex on the layer.
 #[derive(Debug, Clone, Copy)]
 pub struct Grid {
-    pub layer: i16,
+    pub layer: Layer,
     pub xpitch: i64,
     pub ypitch: i64,
 }
@@ -88,7 +118,7 @@ pub struct Grid {
 /// lie on the routing grid" rule.
 #[derive(Debug, Clone, Copy)]
 pub struct Track {
-    pub layer: i16,
+    pub layer: Layer,
     pub width: i64,
     pub pitch: i64,
     pub offset: i64,
@@ -101,8 +131,8 @@ pub struct Track {
 /// advanced-node "a via must match the metal width across the routing direction" rule.
 #[derive(Debug, Clone, Copy)]
 pub struct Corner {
-    pub outer: i16,
-    pub inner: i16,
+    pub outer: Layer,
+    pub inner: Layer,
 }
 
 /// A directional edge-spacing rule: on `layer`'s merged boundary, an edge of length in
@@ -113,7 +143,7 @@ pub struct Corner {
 /// (classify boundary edges by length: tip / wide-tip / narrow-tip / side).
 #[derive(Debug, Clone, Copy)]
 pub struct Sep {
-    pub layer: i16,
+    pub layer: Layer,
     pub a_min: i64,
     pub a_max: i64,
     pub b_min: i64,
@@ -128,7 +158,7 @@ pub struct Sep {
 /// (projection-overlapping) do not cover.
 #[derive(Debug, Clone, Copy)]
 pub struct C2c {
-    pub layer: i16,
+    pub layer: Layer,
     pub dist: i64,
 }
 
@@ -138,7 +168,7 @@ pub struct C2c {
 /// "a short parallel run at tight spacing is forbidden" rule.
 #[derive(Debug, Clone, Copy)]
 pub struct RunLen {
-    pub layer: i16,
+    pub layer: Layer,
     pub space: i64,
     pub min_run: i64,
 }
@@ -148,7 +178,7 @@ pub struct RunLen {
 /// `size`-square fill shapes that keep `gap` clearance from existing geometry.
 #[derive(Debug, Clone, Copy)]
 pub struct Fill {
-    pub layer: i16,
+    pub layer: Layer,
     pub target_pct: i64,
     pub window: i64,
     pub size: i64,
@@ -158,16 +188,16 @@ pub struct Fill {
 #[derive(Debug, Clone, Default)]
 pub struct Rules {
     /// layer → minimum width (DB units).
-    pub width: BTreeMap<i16, i64>,
+    pub width: BTreeMap<Layer, i64>,
     /// layer → minimum spacing (DB units).
-    pub space: BTreeMap<i16, i64>,
+    pub space: BTreeMap<Layer, i64>,
     /// layer → minimum polygon area (DB units²).
-    pub area: BTreeMap<i16, i64>,
+    pub area: BTreeMap<Layer, i64>,
     /// layer → windowed metal-density bounds.
-    pub density: BTreeMap<i16, Density>,
+    pub density: BTreeMap<Layer, Density>,
     /// layer pairs that electrically connect where they overlap (vias / contacts).
     /// Same-layer overlap/touch always connects; cross-layer needs a `connect` rule.
-    pub connect: Vec<(i16, i16)>,
+    pub connect: Vec<(Layer, Layer)>,
     /// antenna ratio rules (need connectivity from `connect`).
     pub antenna: Vec<Antenna>,
     /// enclosure rules (inner must be enclosed by outer with a margin).
@@ -212,13 +242,17 @@ impl Rules {
                 continue;
             }
             let err = |what: &str| RulesError(format!("line {}: {what}: {:?}", n + 1, raw.trim()));
-            let layer: i16 = toks
+            let layer: Layer = toks
                 .get(1)
-                .and_then(|s| s.parse().ok())
-                .ok_or_else(|| err("expected `<rule> <layer> ...`"))?;
+                .and_then(|s| Layer::parse(s))
+                .ok_or_else(|| err("expected `<rule> <layer[/datatype]> ...`"))?;
             // parse the k-th argument (after `<rule> <layer>`) as an integer
             let arg = |k: usize, what: &str| -> Result<i64, RulesError> {
                 toks.get(2 + k).and_then(|s| s.parse().ok()).ok_or_else(|| err(what))
+            };
+            // parse a secondary layer token (a second `layer[/datatype]`) at position `i`
+            let layer_at = |i: usize, what: &str| -> Result<Layer, RulesError> {
+                toks.get(i).and_then(|s| Layer::parse(s)).ok_or_else(|| err(what))
             };
             match toks[0].to_ascii_lowercase().as_str() {
                 "width" => {
@@ -246,18 +280,12 @@ impl Rules {
                 }
                 "connect" => {
                     // `connect <layerA> <layerB>`
-                    let b: i16 = toks
-                        .get(2)
-                        .and_then(|s| s.parse().ok())
-                        .ok_or_else(|| err("connect: expected `<layerA> <layerB>`"))?;
+                    let b = layer_at(2, "connect: expected `<layerA> <layerB>`")?;
                     r.connect.push((layer, b));
                 }
                 "antenna" => {
                     // `antenna <conductor_layer> <gate_layer> <max_ratio>`
-                    let gate: i16 = toks
-                        .get(2)
-                        .and_then(|s| s.parse().ok())
-                        .ok_or_else(|| err("antenna: expected `<conductor> <gate> <max_ratio>`"))?;
+                    let gate = layer_at(2, "antenna: expected `<conductor> <gate> <max_ratio>`")?;
                     let max_ratio: f64 = toks
                         .get(3)
                         .and_then(|s| s.parse().ok())
@@ -269,10 +297,7 @@ impl Rules {
                 }
                 "enclosure" | "enc" => {
                     // `enclosure <outer> <inner> <min>`
-                    let inner: i16 = toks
-                        .get(2)
-                        .and_then(|s| s.parse().ok())
-                        .ok_or_else(|| err("enclosure: expected `<outer> <inner> <min>`"))?;
+                    let inner = layer_at(2, "enclosure: expected `<outer> <inner> <min>`")?;
                     let min: i64 = toks
                         .get(3)
                         .and_then(|s| s.parse().ok())
@@ -281,18 +306,12 @@ impl Rules {
                 }
                 "span" => {
                     // `span <cut_layer> <metal_layer>`
-                    let metal: i16 = toks
-                        .get(2)
-                        .and_then(|s| s.parse().ok())
-                        .ok_or_else(|| err("span: expected `<cut_layer> <metal_layer>`"))?;
+                    let metal = layer_at(2, "span: expected `<cut_layer> <metal_layer>`")?;
                     r.span.push(Span { cut: layer, metal });
                 }
                 "venc" => {
                     // `venc <outer> <inner> <major> <minor>`
-                    let inner: i16 = toks
-                        .get(2)
-                        .and_then(|s| s.parse().ok())
-                        .ok_or_else(|| err("venc: expected `<outer> <inner> <major> <minor>`"))?;
+                    let inner = layer_at(2, "venc: expected `<outer> <inner> <major> <minor>`")?;
                     let major = arg(1, "venc: expected an integer `<major>` (DB units)")?;
                     let minor = arg(2, "venc: expected an integer `<minor>` (DB units)")?;
                     if minor < 0 || major < minor {
@@ -321,10 +340,7 @@ impl Rules {
                 }
                 "corner" => {
                     // `corner <outer_layer> <inner_layer>`
-                    let inner: i16 = toks
-                        .get(2)
-                        .and_then(|s| s.parse().ok())
-                        .ok_or_else(|| err("corner: expected `<outer_layer> <inner_layer>`"))?;
+                    let inner = layer_at(2, "corner: expected `<outer_layer> <inner_layer>`")?;
                     r.corner.push(Corner { outer: layer, inner });
                 }
                 "sep" => {
@@ -411,29 +427,43 @@ impl Rules {
 mod tests {
     use super::*;
 
+    fn l(n: i16) -> Layer { Layer::new(n, 0) }
+
     #[test]
     fn parses_width_and_space() {
         let r = Rules::parse("# deck\nwidth 66 170\nspace 68 140\nspacing 66 150\n").unwrap();
-        assert_eq!(r.width.get(&66), Some(&170));
-        assert_eq!(r.space.get(&68), Some(&140));
-        assert_eq!(r.space.get(&66), Some(&150));
+        assert_eq!(r.width.get(&l(66)), Some(&170));
+        assert_eq!(r.space.get(&l(68)), Some(&140));
+        assert_eq!(r.space.get(&l(66)), Some(&150));
+    }
+
+    #[test]
+    fn datatype_qualifies_the_layer() {
+        // `num/dt` keys on the pair; a bare layer defaults to datatype 0, and two
+        // datatypes on the same GDS layer number are distinct rules.
+        let r = Rules::parse("width 66/20 150\nspace 66/44 340\nwidth 68 140\n").unwrap();
+        assert_eq!(r.width.get(&Layer::new(66, 20)), Some(&150));
+        assert_eq!(r.space.get(&Layer::new(66, 44)), Some(&340));
+        assert_eq!(r.width.get(&Layer::new(66, 0)), None, "66/20 is not 66/0");
+        assert_eq!(r.width.get(&l(68)), Some(&140), "bare layer == datatype 0");
+        assert!(Rules::parse("width 66/xx 150\n").is_err(), "bad datatype rejected");
     }
 
     #[test]
     fn parses_area_and_density() {
         let r = Rules::parse("area 68 20000\ndensity 68 20 70 100000\n").unwrap();
-        assert_eq!(r.area.get(&68), Some(&20000));
-        let d = r.density.get(&68).unwrap();
+        assert_eq!(r.area.get(&l(68)), Some(&20000));
+        let d = r.density.get(&l(68)).unwrap();
         assert_eq!((d.min_pct, d.max_pct, d.window), (20, 70, 100000));
     }
 
     #[test]
     fn parses_connect_and_antenna() {
         let r = Rules::parse("connect 66 67\nconnect 67 68\nantenna 68 5 400\n").unwrap();
-        assert_eq!(r.connect, vec![(66, 67), (67, 68)]);
+        assert_eq!(r.connect, vec![(l(66), l(67)), (l(67), l(68))]);
         assert_eq!(r.antenna.len(), 1);
         let a = r.antenna[0];
-        assert_eq!((a.conductor, a.gate), (68, 5));
+        assert_eq!((a.conductor, a.gate), (l(68), l(5)));
         assert!((a.max_ratio - 400.0).abs() < 1e-9);
     }
 
@@ -441,18 +471,18 @@ mod tests {
     fn parses_enclosure_and_fill() {
         let r = Rules::parse("enclosure 68 66 40\nfill 68 30 1000 50 60\n").unwrap();
         assert_eq!(r.enclosure.len(), 1);
-        assert_eq!((r.enclosure[0].outer, r.enclosure[0].inner, r.enclosure[0].min), (68, 66, 40));
+        assert_eq!((r.enclosure[0].outer, r.enclosure[0].inner, r.enclosure[0].min), (l(68), l(66), 40));
         assert_eq!(r.fill.len(), 1);
         let f = r.fill[0];
-        assert_eq!((f.layer, f.target_pct, f.window, f.size, f.gap), (68, 30, 1000, 50, 60));
+        assert_eq!((f.layer, f.target_pct, f.window, f.size, f.gap), (l(68), 30, 1000, 50, 60));
     }
 
     #[test]
     fn parses_span() {
         let r = Rules::parse("span 66 68\nspan 25 34\n").unwrap();
         assert_eq!(r.span.len(), 2);
-        assert_eq!((r.span[0].cut, r.span[0].metal), (66, 68));
-        assert_eq!((r.span[1].cut, r.span[1].metal), (25, 34));
+        assert_eq!((r.span[0].cut, r.span[0].metal), (l(66), l(68)));
+        assert_eq!((r.span[1].cut, r.span[1].metal), (l(25), l(34)));
     }
 
     #[test]
@@ -460,15 +490,15 @@ mod tests {
         let r = Rules::parse("venc 19 21 20 8\n").unwrap();
         assert_eq!(r.venc.len(), 1);
         let e = r.venc[0];
-        assert_eq!((e.outer, e.inner, e.major, e.minor), (19, 21, 20, 8));
+        assert_eq!((e.outer, e.inner, e.major, e.minor), (l(19), l(21), 20, 8));
     }
 
     #[test]
     fn parses_grid() {
         let r = Rules::parse("grid 40 1 96\ngrid 50 96 1\n").unwrap();
         assert_eq!(r.grid.len(), 2);
-        assert_eq!((r.grid[0].layer, r.grid[0].xpitch, r.grid[0].ypitch), (40, 1, 96));
-        assert_eq!((r.grid[1].layer, r.grid[1].xpitch, r.grid[1].ypitch), (50, 96, 1));
+        assert_eq!((r.grid[0].layer, r.grid[0].xpitch, r.grid[0].ypitch), (l(40), 1, 96));
+        assert_eq!((r.grid[1].layer, r.grid[1].xpitch, r.grid[1].ypitch), (l(50), 96, 1));
     }
 
     #[test]
@@ -476,7 +506,7 @@ mod tests {
         let r = Rules::parse("track 40 96 192 48\n").unwrap();
         assert_eq!(r.track.len(), 1);
         let t = r.track[0];
-        assert_eq!((t.layer, t.width, t.pitch, t.offset), (40, 96, 192, 48));
+        assert_eq!((t.layer, t.width, t.pitch, t.offset), (l(40), 96, 192, 48));
     }
 
     #[test]
