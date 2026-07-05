@@ -1,13 +1,13 @@
 # vyges-drc
 
-Geometric **design-rule check**: a laid-out **GDS** + a per-layer **rule deck** in,
-a list of **violations** out.
+Geometric **design-rule check**: a laid-out layout (**GDSII** or **OASIS**) + a
+per-layer **rule deck** in, a list of **violations** out.
 
 > **Vyges open EDA tools.** Commercial-grade silicon sign-off capability, built on
 > open standards and plain file formats — and meant to be accessible to everyone,
 > not only teams who can license a six-figure tool. `vyges-drc` opens up DRC.
 
-> **Stability: experimental (v0.1.2).** The width and spacing checks are real and
+> **Stability: experimental (v0.1.5).** The fourteen rule classes below are real and
 > tested, but this is an early engine — see **Current state** for exactly what is
 > and isn't covered. Treat it as an inner-loop checker, not tape-out sign-off.
 
@@ -38,11 +38,13 @@ instead of a tool-specific rule language — readable, diffable, schema-checkabl
 cargo build --release            # std-only beyond the vyges-layout kernel
 
 vyges-drc check block.gds --rules sky130.drc            # -> violations report
+vyges-drc check block.oas --rules sky130.drc            # OASIS input (picked by extension)
 vyges-drc check block.gds --rules sky130.drc --top block --json
 vyges-drc check block.gds --rules sky130.drc --fail-on-violation   # exit 3 (CI gate)
 vyges-drc fill  block.gds --rules sky130.drc -o filled.gds         # metal-fill generator
 vyges-drc demo                                          # built-in layout with violations
-# flags: --rules DECK · --top CELL · -o FILE · --json · --fail-on-violation · -h · -V
+# input may be GDSII (.gds) or OASIS (.oas/.oasis); flags: --rules DECK · --top CELL
+#        · -o FILE · --json · --fail-on-violation · -h · -V
 ```
 
 A rule deck keys on a **GDS layer**, written `number/datatype` (a bare `number` means
@@ -75,7 +77,7 @@ fill       70     30 100000 600 400   # top layer 70 to 30% per window (600-fill
 The `fill` rule drives the **`fill` generator** (`vyges-drc fill … -o out.gds`), not
 the checker — the checker ignores it.
 
-## Current state (v0.1.2)
+## Current state (v0.1.5)
 
 **Working & tested:** fourteen rule classes plus a fill generator —
 
@@ -138,8 +140,8 @@ Plus the **`fill` generator** (`vyges-drc fill`): for each `fill` rule it tiles 
 window below the target with clearance-respecting fill shapes and writes a **filled
 GDS** — the fix paired with the density *check*.
 
-GDS load + hierarchy **flatten** (via `vyges-layout`), text + `--json` reports, a
-`--fail-on-violation` CI exit code.
+GDSII **or OASIS** load + hierarchy **flatten** (via `vyges-layout`, format picked by
+file extension), text + `--json` reports, a `--fail-on-violation` CI exit code.
 
 **Depth reserved (honest):**
 
@@ -160,8 +162,6 @@ GDS load + hierarchy **flatten** (via `vyges-layout`), text + `--json` reports, 
 - antenna is a **single-conductor-layer ratio** with a simple overlap-based connect
   model — not yet the cumulative per-metal-layer charge model or a diode-discharge
   credit, and a net with conductor but no gate is treated as not-applicable;
-- enclosure takes outer shapes **un-merged**, so an inner enclosed only by the
-  *union* of two abutting outer rects reports as under-enclosed;
 - `fill` tiles the **design bounding box** (include a die/boundary layer for a sparse
   layout), places fill on the **rule's layer/datatype** (a dedicated fill datatype is a
   follow-up), and reaches the size/gap **geometric ceiling** rather than exceeding it;
