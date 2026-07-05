@@ -64,6 +64,8 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
             "corner" => "via corner departs the metal boundary on both edges".to_string(),
             // sep: directional edge-to-edge spacing (tip-to-side / tip-to-tip)
             "sep" => format!("edge spacing {} dbu < min {}", v.value, v.limit),
+            // c2c: corner-to-corner spacing
+            "c2c" => format!("corner-to-corner {} dbu < min {}", v.value, v.limit),
             // width / space: linear DB units, show µm too
             _ => format!("{} dbu ({:.4} µm) < min {}", v.value, um(v.value), v.limit),
         };

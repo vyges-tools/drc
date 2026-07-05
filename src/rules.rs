@@ -121,6 +121,17 @@ pub struct Sep {
     pub dist: i64,
 }
 
+/// A corner-to-corner spacing rule: on `layer`'s merged boundary, two **parallel**
+/// non-projecting edges (their closest approach is at corners) that face each other across
+/// empty space closer than `dist` violate. The generic advanced-node "minimum diagonal
+/// corner-to-corner spacing" rule — the close approaches that side-to-side / tip spacing
+/// (projection-overlapping) do not cover.
+#[derive(Debug, Clone, Copy)]
+pub struct C2c {
+    pub layer: i16,
+    pub dist: i64,
+}
+
 /// A metal-fill rule (drives the `fill` generator, not the checker): top up
 /// `layer` coverage to at least `target_pct` per square `window`, by tiling
 /// `size`-square fill shapes that keep `gap` clearance from existing geometry.
@@ -162,6 +173,8 @@ pub struct Rules {
     pub corner: Vec<Corner>,
     /// directional edge-spacing rules (tip-to-side / tip-to-tip by edge length class).
     pub sep: Vec<Sep>,
+    /// corner-to-corner spacing rules (diagonal close approaches at corners).
+    pub c2c: Vec<C2c>,
     /// metal-fill rules (consumed by the `fill` generator, not the checker).
     pub fill: Vec<Fill>,
 }
@@ -317,6 +330,14 @@ impl Rules {
                     }
                     r.sep.push(s);
                 }
+                "c2c" => {
+                    // `c2c <layer> <dist>`
+                    let dist = arg(0, "c2c: expected `<layer> <dist>`")?;
+                    if dist <= 0 {
+                        return Err(err("c2c: dist must be > 0"));
+                    }
+                    r.c2c.push(C2c { layer, dist });
+                }
                 "fill" => {
                     // `fill <layer> <target_pct> <window> <size> <gap>`
                     let f = Fill {
@@ -349,6 +370,7 @@ impl Rules {
             && r.track.is_empty()
             && r.corner.is_empty()
             && r.sep.is_empty()
+            && r.c2c.is_empty()
             && r.fill.is_empty()
         {
             return Err(RulesError("no rules defined".into()));

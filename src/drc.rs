@@ -41,7 +41,7 @@ use crate::rules::Rules;
 
 #[derive(Debug, Clone)]
 pub struct Violation {
-    pub rule: &'static str, // width|space|area|density|antenna|enclosure|span|venc|corner|sep|grid|track
+    pub rule: &'static str, // width|space|area|density|antenna|enclosure|span|venc|corner|sep|c2c|grid|track
     pub layer: i16,
     /// The bound that was violated. DB units for width/space, DB units² for area,
     /// **percent** for density, and **centi-ratio** (ratio × 100) for antenna.
@@ -173,6 +173,7 @@ fn merged_layers(rules: &Rules) -> BTreeSet<i16> {
         .chain(rules.venc.iter().map(|r| r.outer))
         .chain(rules.corner.iter().map(|r| r.outer))
         .chain(rules.sep.iter().map(|r| r.layer))
+        .chain(rules.c2c.iter().map(|r| r.layer))
         .collect()
 }
 
@@ -240,6 +241,101 @@ fn sep_violations(rule: &crate::rules::Sep, edges: &[Edge], out: &mut Vec<Violat
 
 fn bbox_edge(e: &Edge) -> Rect {
     Rect { x0: e.a.0.min(e.b.0), y0: e.a.1.min(e.b.1), x1: e.a.0.max(e.b.0), y1: e.a.1.max(e.b.1) }
+}
+
+/// Outward normal of a directed edge (right of travel; solid on the left).
+fn outward_edge(e: &Edge) -> (i64, i64) {
+    ((e.b.1 - e.a.1).signum() as i64, -((e.b.0 - e.a.0).signum() as i64))
+}
+
+/// Strict projection overlap of two parallel axis-aligned edges (side-to-side, not corner).
+fn projecting_edges(a: &Edge, b: &Edge) -> bool {
+    if a.axis() == Axis::Horizontal {
+        let (x1a, x1b) = (a.a.0.min(a.b.0), a.a.0.max(a.b.0));
+        let (x2a, x2b) = (b.a.0.min(b.b.0), b.a.0.max(b.b.0));
+        x1b > x2a && x2b > x1a
+    } else {
+        let (y1a, y1b) = (a.a.1.min(a.b.1), a.a.1.max(a.b.1));
+        let (y2a, y2b) = (b.a.1.min(b.b.1), b.a.1.max(b.b.1));
+        y1b > y2a && y2b > y1a
+    }
+}
+
+/// The two closest points (on a, on b) between two axis-aligned segments.
+fn closest_pts(a: &Edge, b: &Edge) -> ((i32, i32), (i32, i32)) {
+    let clamp = |p: (i32, i32), s: &Edge| {
+        let (x0, y0) = (s.a.0.min(s.b.0), s.a.1.min(s.b.1));
+        let (x1, y1) = (s.a.0.max(s.b.0), s.a.1.max(s.b.1));
+        (p.0.clamp(x0, x1), p.1.clamp(y0, y1))
+    };
+    let dsq = |p: (i32, i32), q: (i32, i32)| {
+        let (dx, dy) = ((p.0 - q.0) as i64, (p.1 - q.1) as i64);
+        dx * dx + dy * dy
+    };
+    let cands = [(a.a, clamp(a.a, b)), (a.b, clamp(a.b, b)), (clamp(b.a, a), b.a), (clamp(b.b, a), b.b)];
+    *cands.iter().min_by_key(|(p, q)| dsq(*p, *q)).unwrap()
+}
+
+fn point_in_region(p: (i32, i32), tiles: &[Rect], idx: &RegionIndex) -> bool {
+    let q = Rect { x0: p.0, y0: p.1, x1: p.0, y1: p.1 };
+    idx.overlaps(&q)
+        .into_iter()
+        .any(|i| { let r = &tiles[i as usize]; r.x0 <= p.0 && p.0 <= r.x1 && r.y0 <= p.1 && p.1 <= r.y1 })
+}
+
+/// Corner-to-corner spacing: parallel non-projecting merged-boundary edges whose closest
+/// approach (at corners) is a `dist`-bounded gap across empty space that both edges face.
+fn c2c_violations(rule: &crate::rules::C2c, edges: &[Edge], tiles: &[Rect], out: &mut Vec<Violation>) {
+    let d2 = rule.dist * rule.dist;
+    let boxes: Vec<Rect> = edges.iter().map(bbox_edge).collect();
+    let eidx = RegionIndex::build(&boxes);
+    let tidx = RegionIndex::build(tiles);
+    let mut seen = std::collections::HashSet::new();
+    for i in 0..edges.len() {
+        for j in eidx.within(&boxes[i], rule.dist as i32, None) {
+            let j = j as usize;
+            if j <= i {
+                continue;
+            }
+            let (ea, eb) = (&edges[i], &edges[j]);
+            if ea.axis() != eb.axis() {
+                continue; // corner-to-corner is between parallel edges
+            }
+            let (ca, cb) = closest_pts(ea, eb);
+            let (dx, dy) = ((ca.0 - cb.0) as i64, (ca.1 - cb.1) as i64);
+            let ds = dx * dx + dy * dy;
+            if ds == 0 || ds >= d2 {
+                continue;
+            }
+            if projecting_edges(ea, eb) {
+                continue; // projection-overlapping is side-to-side / tip spacing, not corner
+            }
+            let mid = ((ca.0 + cb.0) / 2, (ca.1 + cb.1) / 2);
+            if point_in_region(mid, tiles, &tidx) {
+                continue; // material between — not a space
+            }
+            // both edges must face the gap (outward normals point toward each other)
+            let dir = ((cb.0 - ca.0) as i64, (cb.1 - ca.1) as i64);
+            let (oa, ob) = (outward_edge(ea), outward_edge(eb));
+            if oa.0 * dir.0 + oa.1 * dir.1 <= 0 || ob.0 * (-dir.0) + ob.1 * (-dir.1) <= 0 {
+                continue;
+            }
+            let (na, nb) = (bbox_edge(ea), bbox_edge(eb));
+            let key = if (na.x0, na.y0) <= (nb.x0, nb.y0) { (na, nb) } else { (nb, na) };
+            let k = (key.0.x0, key.0.y0, key.0.x1, key.0.y1, key.1.x0, key.1.y0, key.1.x1, key.1.y1);
+            if !seen.insert(k) {
+                continue;
+            }
+            out.push(Violation {
+                rule: "c2c",
+                layer: rule.layer,
+                limit: rule.dist,
+                value: (ds as f64).sqrt() as i64,
+                a: na,
+                b: Some(nb),
+            });
+        }
+    }
 }
 
 /// Run the rule deck over the flattened top cell of `lib`.
@@ -370,6 +466,12 @@ pub fn check_library(
         let tiles = merged_outer.get(&rule.layer).unwrap_or(&no_outer);
         let edges: Vec<Edge> = trace_contours(tiles).iter().flat_map(|r| ring_edges(r)).collect();
         sep_violations(rule, &edges, &mut viols);
+    }
+    // c2c is per-layer corner-to-corner spacing on the merged boundary
+    for rule in &rules.c2c {
+        let tiles = merged_outer.get(&rule.layer).unwrap_or(&no_outer);
+        let edges: Vec<Edge> = trace_contours(tiles).iter().flat_map(|r| ring_edges(r)).collect();
+        c2c_violations(rule, &edges, tiles, &mut viols);
     }
     // grid is per-layer (vertices must lie on a manufacturing grid)
     for rule in &rules.grid {
@@ -1224,6 +1326,18 @@ mod tests {
         assert_eq!((v[0].rule, v[0].value, v[0].limit), ("sep", 4, 5));
         // gap == dist is not a violation
         assert!(check_library(&lib, None, &Rules::parse("sep 19 1 20 1 20 4\n").unwrap()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn c2c_flags_diagonal_corner_gap() {
+        // two squares whose nearest corners are sqrt(32)≈5.66 dbu apart, diagonally
+        let lib = lib_with(vec![rect_elem(19, 0, 0, 10, 10), rect_elem(19, 14, 14, 24, 24)]);
+        // dist 6 catches it — one horizontal-edge pair and one vertical-edge pair
+        let v = check_library(&lib, None, &Rules::parse("c2c 19 6\n").unwrap()).unwrap();
+        assert_eq!(v.len(), 2);
+        assert!(v.iter().all(|x| x.rule == "c2c"));
+        // dist 5 < 5.66: clean
+        assert!(check_library(&lib, None, &Rules::parse("c2c 19 5\n").unwrap()).unwrap().is_empty());
     }
 
     #[test]
