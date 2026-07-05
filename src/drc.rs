@@ -20,15 +20,17 @@
 //! are then rechecked with the exact predicate — near-linear, with results identical
 //! to the all-pairs scan.
 //!
-//! Honest bounds (depth reserved): shapes are taken per input `Boundary` and **not
-//! pre-merged** (a wide wire drawn as abutting rectangles, or two same-net touching
-//! shapes, are treated as drawn) — proper DRC unions same-layer geometry first
-//! (a `vyges-layout` boolean OR) and measures the resulting polygons; non-Manhattan
-//! polygons fall back to their bounding box. Touching/overlapping shapes are
-//! treated as connected (not a spacing violation).
+//! Geometry handling: the **enclosure** family (`enclosure`, `venc`) measures against the
+//! merged outer region — the layer's true rectilinear polygons unioned (a `vyges-layout`
+//! boolean OR) — so a via enclosed across abutting rectangles, or flush against a landing
+//! pad, is judged on the real merged shape rather than a bounding box. The per-shape rules
+//! (width/space/area/density) still take each input `Boundary` as drawn and are **not
+//! pre-merged** (depth reserved). Non-Manhattan polygons fall back to their bounding box;
+//! touching/overlapping shapes are treated as connected (not a spacing violation).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use crate::layout::boolean::{self, Op};
 use crate::layout::flatten;
 use crate::layout::geom::{self, Rect};
 use crate::layout::gds::{Element, Library};
@@ -95,6 +97,87 @@ fn elem_rect(e: &Element) -> (i16, Option<Rect>) {
     }
 }
 
+/// Every edge of a closed polygon is axis-aligned.
+fn is_manhattan(pts: &[(i32, i32)]) -> bool {
+    let n = if pts.len() >= 2 && pts.first() == pts.last() { pts.len() - 1 } else { pts.len() };
+    (0..n).all(|i| {
+        let (x1, y1) = pts[i];
+        let (x2, y2) = pts[(i + 1) % n];
+        x1 == x2 || y1 == y2
+    })
+}
+
+/// A measurable element's `(layer, polygon)` — the **true** rectilinear polygon (notches
+/// preserved), or the bounding box only for a genuinely non-Manhattan shape. Unlike
+/// `elem_rect`, a rectilinear L/notched polygon is kept whole rather than collapsed to its
+/// bbox, so unioning these gives the real merged geometry (enclosure needs this).
+fn elem_poly(e: &Element) -> (i16, Option<Vec<(i32, i32)>>) {
+    match e {
+        Element::Boundary { layer, pts, .. } | Element::Box { layer, pts, .. } => {
+            if is_manhattan(pts) {
+                (*layer, Some(pts.clone()))
+            } else {
+                (*layer, geom::bbox(pts).map(|b| b.as_boundary()))
+            }
+        }
+        _ => (0, None),
+    }
+}
+
+/// Is `q` fully covered by the union of `region` (merged tiles)? Exact: AND `q` with the
+/// local tiles (fetched by the index) and compare area. An empty query is vacuously
+/// covered.
+fn covered(q: &Rect, region: &[Rect], idx: &RegionIndex) -> bool {
+    if q.x0 >= q.x1 || q.y0 >= q.y1 {
+        return true;
+    }
+    let local: Vec<Rect> = idx.overlaps(q).into_iter().map(|i| region[i as usize]).collect();
+    if local.is_empty() {
+        return false;
+    }
+    let inter = boolean::boolean(&[*q], &local, Op::And);
+    inter.iter().map(|r| r.area()).sum::<i64>() == q.area()
+}
+
+/// Projection enclosure of `inner` by the merged `region` on one side: the largest
+/// margin `d ≤ cap` for which the full side-strip of width `d` is covered. `side` is
+/// 0=left, 1=right, 2=bottom, 3=top. Monotone in `d`, so a binary search is exact.
+fn side_margin(inner: &Rect, side: u8, region: &[Rect], idx: &RegionIndex, cap: i64) -> i64 {
+    let strip = |d: i64| match side {
+        0 => Rect { x0: inner.x0 - d as i32, y0: inner.y0, x1: inner.x0, y1: inner.y1 },
+        1 => Rect { x0: inner.x1, y0: inner.y0, x1: inner.x1 + d as i32, y1: inner.y1 },
+        2 => Rect { x0: inner.x0, y0: inner.y0 - d as i32, x1: inner.x1, y1: inner.y0 },
+        _ => Rect { x0: inner.x0, y0: inner.y1, x1: inner.x1, y1: inner.y1 + d as i32 },
+    };
+    let (mut lo, mut hi) = (0i64, cap);
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        if covered(&strip(mid), region, idx) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+/// The merged region of each `outer` layer named by an enclosure/venc rule — the true
+/// rectilinear polygons unioned into tiles (notches preserved). Empty when no such rule.
+fn merged_outer_regions(
+    rules: &Rules,
+    polys_by_layer: &BTreeMap<i16, Vec<Vec<(i32, i32)>>>,
+) -> BTreeMap<i16, Vec<Rect>> {
+    let outer_layers: BTreeSet<i16> =
+        rules.enclosure.iter().map(|r| r.outer).chain(rules.venc.iter().map(|r| r.outer)).collect();
+    let mut merged = BTreeMap::new();
+    let empty = Vec::new();
+    for l in outer_layers {
+        let polys = polys_by_layer.get(&l).unwrap_or(&empty);
+        merged.insert(l, boolean::boolean_poly(polys, &[], Op::Or));
+    }
+    merged
+}
+
 /// Run the rule deck over the flattened top cell of `lib`.
 pub fn check_library(
     lib: &Library,
@@ -112,6 +195,23 @@ pub fn check_library(
             by_layer.entry(layer).or_default().push(r);
         }
     }
+
+    // True rectilinear polygons for the outer layers of enclosure/venc rules, unioned
+    // into the merged region those checks measure against (bbox would fill notches).
+    let outer_layers: BTreeSet<i16> =
+        rules.enclosure.iter().map(|r| r.outer).chain(rules.venc.iter().map(|r| r.outer)).collect();
+    let mut polys_by_layer: BTreeMap<i16, Vec<Vec<(i32, i32)>>> = BTreeMap::new();
+    if !outer_layers.is_empty() {
+        for e in &cell.elements {
+            let (layer, poly) = elem_poly(e);
+            if outer_layers.contains(&layer) {
+                if let Some(p) = poly {
+                    polys_by_layer.entry(layer).or_default().push(p);
+                }
+            }
+        }
+    }
+    let merged_outer = merged_outer_regions(rules, &polys_by_layer);
 
     let mut viols = Vec::new();
     for (&layer, shapes) in &by_layer {
@@ -168,17 +268,23 @@ pub fn check_library(
             by_layer.iter().flat_map(|(&l, shapes)| shapes.iter().map(move |r| (l, *r))).collect();
         antenna_violations(&all, &rules.connect, &rules.antenna, &mut viols);
     }
-    // enclosure is cross-layer (inner inside outer)
+    // enclosure is cross-layer: inner inside the merged outer region
+    let no_inner = Vec::new();
+    let no_outer = Vec::new();
     for rule in &rules.enclosure {
-        enclosure_violations(rule, &by_layer, &mut viols);
+        let inners = by_layer.get(&rule.inner).unwrap_or(&no_inner);
+        let outer = merged_outer.get(&rule.outer).unwrap_or(&no_outer);
+        enclosure_violations(rule, inners, outer, &mut viols);
     }
     // span is cross-layer (a cut must span the width of the metal it sits on)
     for rule in &rules.span {
         span_violations(rule, &by_layer, &mut viols);
     }
-    // venc is cross-layer (asymmetric via enclosure, satisfied on one axis)
+    // venc is cross-layer (asymmetric via enclosure against the merged outer region)
     for rule in &rules.venc {
-        venc_violations(rule, &by_layer, &mut viols);
+        let inners = by_layer.get(&rule.inner).unwrap_or(&no_inner);
+        let outer = merged_outer.get(&rule.outer).unwrap_or(&no_outer);
+        venc_violations(rule, inners, outer, &mut viols);
     }
     // grid is per-layer (vertices must lie on a manufacturing grid)
     for rule in &rules.grid {
@@ -243,37 +349,24 @@ fn rect_area(r: &Rect) -> i64 {
 /// not-pre-merged caveat as the geometry rules.
 fn enclosure_violations(
     rule: &crate::rules::Enclosure,
-    by_layer: &BTreeMap<i16, Vec<Rect>>,
+    inners: &[Rect],
+    outer: &[Rect],
     out: &mut Vec<Violation>,
 ) {
-    let Some(inners) = by_layer.get(&rule.inner) else { return };
-    let empty = Vec::new();
-    let outers = by_layer.get(&rule.outer).unwrap_or(&empty);
+    if inners.is_empty() {
+        return;
+    }
+    let idx = RegionIndex::build(outer);
     for inner in inners {
-        let mut best: Option<i64> = None;
-        for o in outers {
-            // does `o` fully contain `inner`?
-            if o.x0 <= inner.x0 && o.y0 <= inner.y0 && o.x1 >= inner.x1 && o.y1 >= inner.y1 {
-                let m = (inner.x0 - o.x0)
-                    .min(o.x1 - inner.x1)
-                    .min(inner.y0 - o.y0)
-                    .min(o.y1 - inner.y1) as i64;
-                best = Some(best.map_or(m, |b| b.max(m)));
-            }
+        // `inner` must sit inside the merged outer region; else the not-enclosed sentinel.
+        if !covered(inner, outer, &idx) {
+            out.push(Violation { rule: "enclosure", layer: rule.inner, limit: rule.min, value: -1, a: *inner, b: None });
+            continue;
         }
-        match best {
-            Some(m) if m >= rule.min => {}
-            Some(m) => {
-                out.push(Violation { rule: "enclosure", layer: rule.inner, limit: rule.min, value: m, a: *inner, b: None })
-            }
-            None => out.push(Violation {
-                rule: "enclosure",
-                layer: rule.inner,
-                limit: rule.min,
-                value: -1, // not enclosed by any single outer shape
-                a: *inner,
-                b: None,
-            }),
+        // min enclosure over the four sides (capped at `min`; adequate ⇒ no violation).
+        let m = (0..4).map(|s| side_margin(inner, s, outer, &idx, rule.min)).min().unwrap_or(0);
+        if m < rule.min {
+            out.push(Violation { rule: "enclosure", layer: rule.inner, limit: rule.min, value: m, a: *inner, b: None });
         }
     }
 }
@@ -326,45 +419,44 @@ fn span_violations(
 /// actually achieves on a `minor`-qualifying axis (`-1` when no single outer encloses
 /// it), and `limit` is `major`.
 ///
-/// v0 bound (honest): margins are measured against the single containing rect, not the
-/// merged outer geometry, so on dense multi-rect metal it can **over-report** — the local
-/// metal extends via abutting rects the bbox margin doesn't see, while the true check is a
-/// projection metric on the merged shape. This is conservative (it over-flags rather than
-/// misses), and an exact match needs the merged/projection geometry.
+/// Margins are projection enclosures against the **merged** outer region (its true
+/// rectilinear polygons unioned), so a landing pad flush on one side flags correctly and a
+/// wire drawn as abutting rectangles does not spuriously over-report — matching a
+/// merged-geometry checker. `value` is the best major-side enclosure on a `minor`-qualifying
+/// axis (`0` when enclosed but no axis qualifies, `-1` when the inner is not inside the
+/// merged outer at all).
 fn venc_violations(
     rule: &crate::rules::Venc,
-    by_layer: &BTreeMap<i16, Vec<Rect>>,
+    inners: &[Rect],
+    outer: &[Rect],
     out: &mut Vec<Violation>,
 ) {
-    let Some(inners) = by_layer.get(&rule.inner) else { return };
-    let empty = Vec::new();
-    let outers = by_layer.get(&rule.outer).unwrap_or(&empty);
+    if inners.is_empty() {
+        return;
+    }
+    let idx = RegionIndex::build(outer);
     for inner in inners {
-        let mut contained = false;
-        let mut best_major: i64 = -1; // best major-margin on a minor-qualifying axis
-        for o in outers {
-            // does `o` fully contain `inner`?
-            if o.x0 <= inner.x0 && o.y0 <= inner.y0 && o.x1 >= inner.x1 && o.y1 >= inner.y1 {
-                contained = true;
-                let (l, r) = ((inner.x0 - o.x0) as i64, (o.x1 - inner.x1) as i64);
-                let (b, t) = ((inner.y0 - o.y0) as i64, (o.y1 - inner.y1) as i64);
-                // an axis "qualifies" when both its opposite margins meet `minor`; its
-                // contribution is then the larger of the two (the major side).
-                if l.min(r) >= rule.minor {
-                    best_major = best_major.max(l.max(r));
-                }
-                if b.min(t) >= rule.minor {
-                    best_major = best_major.max(b.max(t));
-                }
-            }
+        if !covered(inner, outer, &idx) {
+            out.push(Violation { rule: "venc", layer: rule.inner, limit: rule.major, value: -1, a: *inner, b: None });
+            continue;
         }
-        if best_major >= rule.major {
-            continue; // enclosed adequately on at least one axis
+        // per-side enclosure against the merged outer region (capped at `major`).
+        let l = side_margin(inner, 0, outer, &idx, rule.major);
+        let r = side_margin(inner, 1, outer, &idx, rule.major);
+        let b = side_margin(inner, 2, outer, &idx, rule.major);
+        let t = side_margin(inner, 3, outer, &idx, rule.major);
+        // an axis "qualifies" when both its opposite margins meet `minor`; its contribution
+        // is then the larger of the two (the major side).
+        let mut best_major: i64 = 0;
+        if l.min(r) >= rule.minor {
+            best_major = best_major.max(l.max(r));
         }
-        // value: best major achieved on a qualifying axis (≥0) if enclosed at all,
-        // else -1 (not enclosed by any single outer shape).
-        let value = if contained { best_major.max(0) } else { -1 };
-        out.push(Violation { rule: "venc", layer: rule.inner, limit: rule.major, value, a: *inner, b: None });
+        if b.min(t) >= rule.minor {
+            best_major = best_major.max(b.max(t));
+        }
+        if best_major < rule.major {
+            out.push(Violation { rule: "venc", layer: rule.inner, limit: rule.major, value: best_major, a: *inner, b: None });
+        }
     }
 }
 
