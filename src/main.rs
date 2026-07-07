@@ -28,8 +28,32 @@ flags:
   -o FILE               write the report (or, for `fill`, the filled GDS) to FILE
   --json                machine-readable JSON instead of text
   --fail-on-violation   exit 3 when any violation is found (CI gate)
+  --describe            print a machine-readable JSON description of the command
   -h, --help · -V, --version
 ";
+
+/// Machine-readable description of `vyges-drc check` for tooling that drives the
+/// command programmatically (parameters, how to build the invocation, output).
+const DESCRIBE: &str = r#"{
+  "name": "drc",
+  "summary": "geometric design-rule check (GDS/OASIS layout + rule deck)",
+  "invocation": {
+    "args_template": ["check", "{gds}", "--rules", "{deck}"],
+    "optional": [ { "arg": "top", "flag": "--top" } ],
+    "emits_json": true
+  },
+  "inputs": {
+    "type": "object",
+    "required": ["gds", "deck"],
+    "properties": {
+      "gds":  { "type": "string", "description": "layout file to check (.gds or .oas)" },
+      "deck": { "type": "string", "description": "the .drc rule deck" },
+      "top":  { "type": "string", "description": "top cell to flatten (default: the sole cell)" }
+    }
+  },
+  "artifacts": []
+}
+"#;
 
 fn render_text(viols: &[Violation], db_unit: f64) -> String {
     let um = |dbu: i64| dbu as f64 * db_unit * 1e6; // DB units -> µm
@@ -123,6 +147,10 @@ fn main() {
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
         println!("vyges-drc {}", vyges_drc::VERSION);
+        return;
+    }
+    if args.iter().any(|a| a == "--describe") {
+        print!("{DESCRIBE}");
         return;
     }
     let json = args.iter().any(|a| a == "--json");
