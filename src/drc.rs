@@ -183,44 +183,6 @@ impl Uf {
     }
 }
 
-/// Component id per merged tile — tiles whose closed bounding boxes touch or overlap are one
-/// connected polygon. Distinct components are the distinct polygons `space` measures between.
-fn tile_components(tiles: &[Rect], tidx: &RegionIndex) -> Vec<usize> {
-    let mut uf = Uf::new(tiles.len());
-    for (i, r) in tiles.iter().enumerate() {
-        for j in tidx.overlaps(&r.inflate(1)) {
-            let j = j as usize;
-            if j != i {
-                let s = &tiles[j];
-                if r.x0 <= s.x1 && s.x0 <= r.x1 && r.y0 <= s.y1 && s.y0 <= r.y1 {
-                    uf.union(i, j);
-                }
-            }
-        }
-    }
-    (0..tiles.len()).map(|i| uf.find(i)).collect()
-}
-
-/// A point 1 dbu inside the solid, off the interior (left) side of a directed edge.
-fn interior_point(e: &Edge) -> (i32, i32) {
-    let dx = (e.b.0 - e.a.0).signum();
-    let dy = (e.b.1 - e.a.1).signum();
-    let mid = ((e.a.0 + e.b.0) / 2, (e.a.1 + e.b.1) / 2);
-    (mid.0 - dy, mid.1 + dx) // left normal (-dy, dx)
-}
-
-/// Component id of the tile containing a point (`usize::MAX` if none).
-fn point_component(p: (i32, i32), tiles: &[Rect], comp: &[usize], tidx: &RegionIndex) -> usize {
-    let q = Rect { x0: p.0, y0: p.1, x1: p.0, y1: p.1 };
-    for i in tidx.overlaps(&q) {
-        let r = &tiles[i as usize];
-        if r.x0 <= p.0 && p.0 <= r.x1 && r.y0 <= p.1 && p.1 <= r.y1 {
-            return comp[i as usize];
-        }
-    }
-    usize::MAX
-}
-
 /// Perpendicular gap and projection-overlap span of two parallel axis-aligned edges;
 /// `None` when they do not overlap in projection.
 fn perp_gap(ea: &Edge, eb: &Edge) -> Option<(i64, i32, i32, bool)> {
@@ -252,23 +214,18 @@ fn edge_spacing_check(layer: i16, min_d: i64, tiles: &[Rect], want_solid: bool, 
     let tidx = RegionIndex::build(tiles);
     let boxes: Vec<Rect> = edges.iter().map(bbox_edge).collect();
     let eidx = RegionIndex::build(&boxes);
-    // `space` is between *distinct* polygons — label each edge by its interior component so
-    // two edges of the same wire (a notch or the wire's own width) never count as a gap.
-    let edge_comp: Vec<usize> = if want_solid {
-        Vec::new()
-    } else {
-        let tcomp = tile_components(tiles, &tidx);
-        edges.iter().map(|e| point_component(interior_point(e), tiles, &tcomp, &tidx)).collect()
-    };
+    // `space` measures the gap between facing edges of the merged region. It is NOT
+    // filtered by polygon component: an internal notch (a concave gap where the region
+    // is absent between two edges of the *same* polygon) is a real spacing violation —
+    // KLayout's `space` flags it too. The wire's own body (two edges across solid metal,
+    // i.e. a width dimension) is excluded below by the `point_in_region(mid)` guard: for
+    // `space` the midpoint must be OUTSIDE the region, so only true gaps/notches count.
     let mut seen = std::collections::HashSet::new();
     for i in 0..edges.len() {
         for j in eidx.within(&boxes[i], min_d as i32, None) {
             let j = j as usize;
             if j <= i {
                 continue;
-            }
-            if !want_solid && edge_comp[i] == edge_comp[j] {
-                continue; // same polygon (notch / self) — not a spacing gap
             }
             let (ea, eb) = (&edges[i], &edges[j]);
             if ea.axis() != eb.axis() {
