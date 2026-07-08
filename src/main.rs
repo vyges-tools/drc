@@ -24,6 +24,7 @@ The input layout may be GDSII (.gds) or OASIS (.oas/.oasis) — picked by extens
 
 flags:
   --rules DECK          the .drc rule deck (required for `check` / `fill`)
+  --pdk NAME            resolve the deck from pdk-store (drc_deck) instead of --rules
   --top CELL            top cell to flatten (default: the sole cell)
   -o FILE               write the report (or, for `fill`, the filled GDS) to FILE
   --json                machine-readable JSON instead of text
@@ -139,6 +140,29 @@ fn opt(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
 }
 
+/// Resolve a PDK collateral key (e.g. `drc_deck`) to a concrete path via the
+/// installed `vyges-pdk-store` resolver — the PDK adapter. Prefers the sibling
+/// binary next to this one, else falls back to PATH. Returns None if unavailable.
+fn pdk_resolve(pdk: &str, key: &str) -> Option<String> {
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("vyges-pdk-store")))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned());
+    let prog = sibling.unwrap_or_else(|| "vyges-pdk-store".into());
+    let out = std::process::Command::new(prog).args(["resolve", pdk, key]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// The DRC deck: from `--rules DECK`, else resolved from `--pdk NAME` (drc_deck).
+fn deck_arg(args: &[String]) -> Option<String> {
+    opt(args, "--rules").or_else(|| opt(args, "--pdk").and_then(|p| pdk_resolve(&p, "drc_deck")))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") || args.is_empty() {
@@ -162,8 +186,8 @@ fn main() {
             eprintln!("error: `fill` needs a GDS path\n{USAGE}");
             exit(2);
         };
-        let Some(deck) = opt(&args, "--rules") else {
-            eprintln!("error: `fill` needs --rules DECK\n{USAGE}");
+        let Some(deck) = deck_arg(&args) else {
+            eprintln!("error: `fill` needs --rules DECK or --pdk NAME\n{USAGE}");
             exit(2);
         };
         let Some(out) = opt(&args, "-o") else {
@@ -203,8 +227,8 @@ fn main() {
                 eprintln!("error: `check` needs a GDS path\n{USAGE}");
                 exit(2);
             };
-            let Some(deck) = opt(&args, "--rules") else {
-                eprintln!("error: `check` needs --rules DECK\n{USAGE}");
+            let Some(deck) = deck_arg(&args) else {
+                eprintln!("error: `check` needs --rules DECK or --pdk NAME\n{USAGE}");
                 exit(2);
             };
             let lib = Library::load_any(gds).unwrap_or_else(|e| {
