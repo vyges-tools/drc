@@ -143,29 +143,11 @@ fn opt(args: &[String], name: &str) -> Option<String> {
 /// Resolve a PDK collateral key (e.g. `drc_deck`) to a concrete path via the
 /// installed `vyges-pdk-store` resolver — the PDK adapter. Prefers the sibling
 /// binary next to this one, else falls back to PATH. Returns None if unavailable.
-/// On failure returns the resolver's own message (e.g. `"foo": not a known PDK —
-/// run list…`) so the caller can surface it instead of a generic usage error.
+/// Resolve a PDK collateral key (e.g. `drc_deck`) via the shared foundation
+/// resolver (the `pdk-store` adapter, with `$VYGES_PLUGIN` fallback + detailed
+/// errors). See `vyges_layout::pdk::resolve`.
 fn pdk_resolve(pdk: &str, key: &str) -> Result<String, String> {
-    let sibling = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("vyges-pdk-store")))
-        .filter(|p| p.exists())
-        .map(|p| p.to_string_lossy().into_owned());
-    let prog = sibling.unwrap_or_else(|| "vyges-pdk-store".into());
-    let out = std::process::Command::new(prog)
-        .args(["resolve", pdk, key])
-        .output()
-        .map_err(|e| format!("vyges-pdk-store not runnable: {e}"))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("error:").trim().to_string();
-        return Err(if err.is_empty() { format!("could not resolve {key} for PDK {pdk:?}") } else { err });
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        Err(format!("pdk-store returned no path for {key} of PDK {pdk:?}"))
-    } else {
-        Ok(s)
-    }
+    vyges_layout::pdk::resolve(pdk, key, None)
 }
 
 /// The DRC deck: from `--rules DECK`, else resolved from `--pdk NAME` (drc_deck).
