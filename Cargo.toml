@@ -1,6 +1,6 @@
 [package]
 name = "vyges-drc"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 description = "Design-rule check: a GDS layout + a rule deck in, geometry violations out."
 license = "Apache-2.0"
