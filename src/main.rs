@@ -52,7 +52,7 @@ const DESCRIBE: &str = r#"{
       "top":  { "type": "string", "description": "top cell to flatten (default: the sole cell)" }
     }
   },
-  "artifacts": []
+  "artifacts": [ { "role": "drc_report" } ]
 }
 "#;
 
