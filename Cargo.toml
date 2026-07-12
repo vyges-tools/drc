@@ -12,6 +12,9 @@ repository = "https://github.com/vyges-tools/drc"
 # the vyges-layout foundation — the same kernel vyges-lvs rides on.
 [dependencies]
 vyges-layout = { git = "https://github.com/vyges-tools/layout", branch = "main" }
+# Structured events (vyges-events/1.0) for the MCP causal trail. Core-only (no tracing
+# subscriber pulled into the engine) — vyges-drc emits Event directly.
+vyges-events = { git = "https://github.com/vyges-tools/events", branch = "main", default-features = false }
 
 [[bin]]
 name = "vyges-drc"
