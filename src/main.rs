@@ -168,6 +168,35 @@ fn deck_arg(args: &[String]) -> Option<String> {
     None
 }
 
+/// Emit the vyges-events causal trail — one event per DRC violation + a completion event.
+/// Written to stderr (the default sink) so it never mixes with the report (stdout / -o).
+/// `code` (DRC-<RULE>) is the clustering key; `objects` (layer) is the cross-stage co-ref key.
+fn emit_events(viols: &[Violation]) {
+    use vyges_events::{emit, Event, Severity};
+    for v in viols {
+        emit(
+            &Event::new(
+                "vyges-drc",
+                Severity::Warn,
+                format!(
+                    "{} violation on layer {}: value {} vs limit {}",
+                    v.rule, v.layer, v.value, v.limit
+                ),
+            )
+            .with_code(format!("DRC-{}", v.rule.to_uppercase()))
+            .with_objects(vec![format!("layer:{}", v.layer)]),
+        );
+    }
+    emit(
+        &Event::new(
+            "vyges-drc",
+            if viols.is_empty() { Severity::Info } else { Severity::Warn },
+            format!("drc check complete: {} violation(s)", viols.len()),
+        )
+        .with_code("DRC-DONE"),
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") || args.is_empty() {
@@ -290,6 +319,7 @@ fn main() {
         eprintln!("error: {e}");
         exit(1);
     });
+    emit_events(&viols); // vyges-events causal trail on stderr; the report goes to stdout / -o
     let text = if json { render_json(&viols) } else { render_text(&viols, lib.db_unit) };
     match opt(&args, "-o") {
         Some(path) => {
