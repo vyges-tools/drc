@@ -118,7 +118,7 @@ dependencies = [
 [[package]]
 name = "vyges-events"
 version = "0.1.0"
-source = "git+https://github.com/vyges-tools/events?branch=main#a1fc8d4fc05ef07451bcf10e476e1bbf84944368"
+source = "git+https://github.com/vyges-tools/events?branch=main#7ba025d72a54605d1683d3ff9115088dbe4ef62d"
 dependencies = [
  "serde",
  "serde_json",
