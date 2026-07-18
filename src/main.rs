@@ -38,6 +38,11 @@ flags:
 const DESCRIBE: &str = r#"{
   "name": "drc",
   "summary": "geometric design-rule check (GDS/OASIS layout + rule deck)",
+  "maturity": "structured",
+  "provenance_limitations": [
+      "input_hash covers the argument vector, not the content of the GDS or rule deck it names.",
+      "A rule deck that includes other decks is not enumerated, so those are outside the hash."
+  ],
   "invocation": {
     "args_template": ["check", "{gds}", "--rules", "{deck}"],
     "optional": [ { "arg": "top", "flag": "--top" }, { "arg": "out", "flag": "-o" } ],
