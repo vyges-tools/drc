@@ -40,7 +40,7 @@ const DESCRIBE: &str = r#"{
   "summary": "geometric design-rule check (GDS/OASIS layout + rule deck)",
   "invocation": {
     "args_template": ["check", "{gds}", "--rules", "{deck}"],
-    "optional": [ { "arg": "top", "flag": "--top" } ],
+    "optional": [ { "arg": "top", "flag": "--top" }, { "arg": "out", "flag": "-o" } ],
     "emits_json": true
   },
   "inputs": {
@@ -49,10 +49,11 @@ const DESCRIBE: &str = r#"{
     "properties": {
       "gds":  { "type": "string", "description": "layout file to check (.gds or .oas)" },
       "deck": { "type": "string", "description": "the .drc rule deck" },
-      "top":  { "type": "string", "description": "top cell to flatten (default: the sole cell)" }
+      "top":  { "type": "string", "description": "top cell to flatten (default: the sole cell)" },
+      "out":  { "type": "string", "description": "write the report to FILE instead of stdout" }
     }
   },
-  "artifacts": [ { "role": "drc_report" } ],
+  "artifacts": [ { "role": "drc_report", "from_arg": "out" } ],
   "assertion": {
     "id": "drc-clean",
     "field": "clean",
