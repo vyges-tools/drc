@@ -36,8 +36,14 @@ impl Layer {
     /// Parse a deck layer token: `"66/20"` → `66/20`, bare `"66"` → `66/0`.
     pub fn parse(s: &str) -> Option<Layer> {
         match s.split_once('/') {
-            Some((n, d)) => Some(Layer { num: n.trim().parse().ok()?, dt: d.trim().parse().ok()? }),
-            None => Some(Layer { num: s.trim().parse().ok()?, dt: 0 }),
+            Some((n, d)) => Some(Layer {
+                num: n.trim().parse().ok()?,
+                dt: d.trim().parse().ok()?,
+            }),
+            None => Some(Layer {
+                num: s.trim().parse().ok()?,
+                dt: 0,
+            }),
         }
     }
 }
@@ -248,21 +254,34 @@ impl Rules {
                 .ok_or_else(|| err("expected `<rule> <layer[/datatype]> ...`"))?;
             // parse the k-th argument (after `<rule> <layer>`) as an integer
             let arg = |k: usize, what: &str| -> Result<i64, RulesError> {
-                toks.get(2 + k).and_then(|s| s.parse().ok()).ok_or_else(|| err(what))
+                toks.get(2 + k)
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| err(what))
             };
             // parse a secondary layer token (a second `layer[/datatype]`) at position `i`
             let layer_at = |i: usize, what: &str| -> Result<Layer, RulesError> {
-                toks.get(i).and_then(|s| Layer::parse(s)).ok_or_else(|| err(what))
+                toks.get(i)
+                    .and_then(|s| Layer::parse(s))
+                    .ok_or_else(|| err(what))
             };
             match toks[0].to_ascii_lowercase().as_str() {
                 "width" => {
-                    r.width.insert(layer, arg(0, "expected an integer minimum width (DB units)")?);
+                    r.width.insert(
+                        layer,
+                        arg(0, "expected an integer minimum width (DB units)")?,
+                    );
                 }
                 "space" | "spacing" => {
-                    r.space.insert(layer, arg(0, "expected an integer minimum spacing (DB units)")?);
+                    r.space.insert(
+                        layer,
+                        arg(0, "expected an integer minimum spacing (DB units)")?,
+                    );
                 }
                 "area" => {
-                    r.area.insert(layer, arg(0, "expected an integer minimum area (DB units²)")?);
+                    r.area.insert(
+                        layer,
+                        arg(0, "expected an integer minimum area (DB units²)")?,
+                    );
                 }
                 "density" => {
                     let d = Density {
@@ -293,7 +312,11 @@ impl Rules {
                     if !max_ratio.is_finite() || max_ratio <= 0.0 {
                         return Err(err("antenna max_ratio must be a finite number > 0"));
                     }
-                    r.antenna.push(Antenna { conductor: layer, gate, max_ratio });
+                    r.antenna.push(Antenna {
+                        conductor: layer,
+                        gate,
+                        max_ratio,
+                    });
                 }
                 "enclosure" | "enc" => {
                     // `enclosure <outer> <inner> <min>`
@@ -302,7 +325,11 @@ impl Rules {
                         .get(3)
                         .and_then(|s| s.parse().ok())
                         .ok_or_else(|| err("enclosure: expected an integer `<min>` (DB units)"))?;
-                    r.enclosure.push(Enclosure { outer: layer, inner, min });
+                    r.enclosure.push(Enclosure {
+                        outer: layer,
+                        inner,
+                        min,
+                    });
                 }
                 "span" => {
                     // `span <cut_layer> <metal_layer>`
@@ -317,7 +344,12 @@ impl Rules {
                     if minor < 0 || major < minor {
                         return Err(err("venc: need major ≥ minor ≥ 0"));
                     }
-                    r.venc.push(Venc { outer: layer, inner, major, minor });
+                    r.venc.push(Venc {
+                        outer: layer,
+                        inner,
+                        major,
+                        minor,
+                    });
                 }
                 "grid" => {
                     // `grid <layer> <xpitch> <ypitch>`
@@ -326,7 +358,11 @@ impl Rules {
                     if xpitch <= 0 || ypitch <= 0 {
                         return Err(err("grid: xpitch and ypitch must be > 0"));
                     }
-                    r.grid.push(Grid { layer, xpitch, ypitch });
+                    r.grid.push(Grid {
+                        layer,
+                        xpitch,
+                        ypitch,
+                    });
                 }
                 "track" => {
                     // `track <layer> <width> <pitch> <offset>`
@@ -336,16 +372,25 @@ impl Rules {
                     if width <= 0 || pitch <= 0 {
                         return Err(err("track: width and pitch must be > 0"));
                     }
-                    r.track.push(Track { layer, width, pitch, offset });
+                    r.track.push(Track {
+                        layer,
+                        width,
+                        pitch,
+                        offset,
+                    });
                 }
                 "corner" => {
                     // `corner <outer_layer> <inner_layer>`
                     let inner = layer_at(2, "corner: expected `<outer_layer> <inner_layer>`")?;
-                    r.corner.push(Corner { outer: layer, inner });
+                    r.corner.push(Corner {
+                        outer: layer,
+                        inner,
+                    });
                 }
                 "sep" => {
                     // `sep <layer> <a_min> <a_max> <b_min> <b_max> <dist>` (max 0 = unbounded)
-                    let e = || err("sep: expected `<layer> <a_min> <a_max> <b_min> <b_max> <dist>`");
+                    let e =
+                        || err("sep: expected `<layer> <a_min> <a_max> <b_min> <b_max> <dist>`");
                     let s = Sep {
                         layer,
                         a_min: arg(0, "sep").map_err(|_| e())?,
@@ -374,16 +419,32 @@ impl Rules {
                     if space <= 0 || min_run <= 0 {
                         return Err(err("runlen: space and min_run must be > 0"));
                     }
-                    r.runlen.push(RunLen { layer, space, min_run });
+                    r.runlen.push(RunLen {
+                        layer,
+                        space,
+                        min_run,
+                    });
                 }
                 "fill" => {
                     // `fill <layer> <target_pct> <window> <size> <gap>`
                     let f = Fill {
                         layer,
-                        target_pct: arg(0, "fill: expected `<layer> <target%> <window> <size> <gap>`")?,
-                        window: arg(1, "fill: expected `<layer> <target%> <window> <size> <gap>`")?,
-                        size: arg(2, "fill: expected `<layer> <target%> <window> <size> <gap>`")?,
-                        gap: arg(3, "fill: expected `<layer> <target%> <window> <size> <gap>`")?,
+                        target_pct: arg(
+                            0,
+                            "fill: expected `<layer> <target%> <window> <size> <gap>`",
+                        )?,
+                        window: arg(
+                            1,
+                            "fill: expected `<layer> <target%> <window> <size> <gap>`",
+                        )?,
+                        size: arg(
+                            2,
+                            "fill: expected `<layer> <target%> <window> <size> <gap>`",
+                        )?,
+                        gap: arg(
+                            3,
+                            "fill: expected `<layer> <target%> <window> <size> <gap>`",
+                        )?,
                     };
                     if f.window <= 0 || f.size <= 0 || f.gap < 0 {
                         return Err(err("fill: window and size must be > 0, gap ≥ 0"));
@@ -427,7 +488,9 @@ impl Rules {
 mod tests {
     use super::*;
 
-    fn l(n: i16) -> Layer { Layer::new(n, 0) }
+    fn l(n: i16) -> Layer {
+        Layer::new(n, 0)
+    }
 
     #[test]
     fn parses_width_and_space() {
@@ -446,7 +509,10 @@ mod tests {
         assert_eq!(r.space.get(&Layer::new(66, 44)), Some(&340));
         assert_eq!(r.width.get(&Layer::new(66, 0)), None, "66/20 is not 66/0");
         assert_eq!(r.width.get(&l(68)), Some(&140), "bare layer == datatype 0");
-        assert!(Rules::parse("width 66/xx 150\n").is_err(), "bad datatype rejected");
+        assert!(
+            Rules::parse("width 66/xx 150\n").is_err(),
+            "bad datatype rejected"
+        );
     }
 
     #[test]
@@ -471,10 +537,20 @@ mod tests {
     fn parses_enclosure_and_fill() {
         let r = Rules::parse("enclosure 68 66 40\nfill 68 30 1000 50 60\n").unwrap();
         assert_eq!(r.enclosure.len(), 1);
-        assert_eq!((r.enclosure[0].outer, r.enclosure[0].inner, r.enclosure[0].min), (l(68), l(66), 40));
+        assert_eq!(
+            (
+                r.enclosure[0].outer,
+                r.enclosure[0].inner,
+                r.enclosure[0].min
+            ),
+            (l(68), l(66), 40)
+        );
         assert_eq!(r.fill.len(), 1);
         let f = r.fill[0];
-        assert_eq!((f.layer, f.target_pct, f.window, f.size, f.gap), (l(68), 30, 1000, 50, 60));
+        assert_eq!(
+            (f.layer, f.target_pct, f.window, f.size, f.gap),
+            (l(68), 30, 1000, 50, 60)
+        );
     }
 
     #[test]
@@ -497,8 +573,14 @@ mod tests {
     fn parses_grid() {
         let r = Rules::parse("grid 40 1 96\ngrid 50 96 1\n").unwrap();
         assert_eq!(r.grid.len(), 2);
-        assert_eq!((r.grid[0].layer, r.grid[0].xpitch, r.grid[0].ypitch), (l(40), 1, 96));
-        assert_eq!((r.grid[1].layer, r.grid[1].xpitch, r.grid[1].ypitch), (l(50), 96, 1));
+        assert_eq!(
+            (r.grid[0].layer, r.grid[0].xpitch, r.grid[0].ypitch),
+            (l(40), 1, 96)
+        );
+        assert_eq!(
+            (r.grid[1].layer, r.grid[1].xpitch, r.grid[1].ypitch),
+            (l(50), 96, 1)
+        );
     }
 
     #[test]

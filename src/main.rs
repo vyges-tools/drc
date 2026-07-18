@@ -77,15 +77,28 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
             "density" if v.value < v.limit => format!("{}% coverage < min {}%", v.value, v.limit),
             "density" => format!("{}% coverage > max {}%", v.value, v.limit),
             // antenna: value / limit are centi-ratio (ratio × 100)
-            "antenna" => format!("ratio {:.2} > max {:.2}", v.value as f64 / 100.0, v.limit as f64 / 100.0),
+            "antenna" => format!(
+                "ratio {:.2} > max {:.2}",
+                v.value as f64 / 100.0,
+                v.limit as f64 / 100.0
+            ),
             // enclosure: value < 0 is the "not enclosed at all" sentinel
             "enclosure" if v.value < 0 => format!("not enclosed (need {} margin)", v.limit),
             "enclosure" => format!("enclosure {} dbu < min {}", v.value, v.limit),
             // span: value is the total edge deviation from spanning the metal width
-            "span" => format!("cut off metal-width by {} dbu (edges not coincident)", v.value),
+            "span" => format!(
+                "cut off metal-width by {} dbu (edges not coincident)",
+                v.value
+            ),
             // venc: value < 0 is the "not enclosed by a single outer" sentinel
-            "venc" if v.value < 0 => format!("not enclosed by a single outer (need {} on one axis)", v.limit),
-            "venc" => format!("enclosure {} dbu < required {} on any single axis", v.value, v.limit),
+            "venc" if v.value < 0 => format!(
+                "not enclosed by a single outer (need {} on one axis)",
+                v.limit
+            ),
+            "venc" => format!(
+                "enclosure {} dbu < required {} on any single axis",
+                v.value, v.limit
+            ),
             // grid: the offending vertex is carried in the location field
             "grid" => "off-grid vertex".to_string(),
             // track: a min-width wire off the routing-track centerline grid
@@ -102,13 +115,18 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
             _ => format!("{} dbu ({:.4} µm) < min {}", v.value, um(v.value), v.limit),
         };
         match v.b {
-            None if v.rule == "density" => {
-                s.push_str(&format!("  density layer {}: {clause} in window {at}\n", v.layer))
-            }
-            None if v.rule == "antenna" => {
-                s.push_str(&format!("  antenna layer {}: {clause} on net {at}\n", v.layer))
-            }
-            None => s.push_str(&format!("  {} layer {}: {clause} at {at}\n", v.rule, v.layer)),
+            None if v.rule == "density" => s.push_str(&format!(
+                "  density layer {}: {clause} in window {at}\n",
+                v.layer
+            )),
+            None if v.rule == "antenna" => s.push_str(&format!(
+                "  antenna layer {}: {clause} on net {at}\n",
+                v.layer
+            )),
+            None => s.push_str(&format!(
+                "  {} layer {}: {clause} at {at}\n",
+                v.rule, v.layer
+            )),
             Some(b) if v.rule == "span" => s.push_str(&format!(
                 "  span layer {}: {clause} — cut {at} on metal ({},{})-({},{})\n",
                 v.layer, b.x0, b.y0, b.x1, b.y1
@@ -142,7 +160,9 @@ fn render_json(viols: &[Violation]) -> String {
 }
 
 fn opt(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 /// Resolve a PDK collateral key (e.g. `drc_deck`) to a concrete path via the
@@ -195,7 +215,11 @@ fn emit_events(viols: &[Violation]) {
     emit(
         &Event::new(
             "vyges-drc",
-            if viols.is_empty() { Severity::Info } else { Severity::Warn },
+            if viols.is_empty() {
+                Severity::Info
+            } else {
+                Severity::Warn
+            },
             format!("drc check complete: {} violation(s)", viols.len()),
         )
         .with_code("DRC-DONE"),
@@ -325,7 +349,11 @@ fn main() {
         exit(1);
     });
     emit_events(&viols); // vyges-events causal trail on stderr; the report goes to stdout / -o
-    let text = if json { render_json(&viols) } else { render_text(&viols, lib.db_unit) };
+    let text = if json {
+        render_json(&viols)
+    } else {
+        render_text(&viols, lib.db_unit)
+    };
     match opt(&args, "-o") {
         Some(path) => {
             if let Err(e) = std::fs::write(&path, &text) {

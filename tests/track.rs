@@ -10,7 +10,11 @@ use vyges_drc::layout::gds::{Cell, Element, Library};
 use vyges_drc::rules::Rules;
 
 fn rect(layer: i16, x0: i32, y0: i32, x1: i32, y1: i32) -> Element {
-    Element::Boundary { layer, datatype: 0, pts: vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)] }
+    Element::Boundary {
+        layer,
+        datatype: 0,
+        pts: vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)],
+    }
 }
 
 #[test]
@@ -20,7 +24,7 @@ fn min_width_wires_must_be_on_track_grid() {
     // is off-grid. A 2x-wide wire is exempt.
     let rules = Rules::parse("track 40 96 192 48\n").unwrap();
     let elements = vec![
-        rect(40, 0, 0, 3000, 96), // on-grid (cl 48)
+        rect(40, 0, 0, 3000, 96),    // on-grid (cl 48)
         rect(40, 0, 192, 3000, 288), // on-grid (cl 240)
         // off-grid wire (cl 144), drawn as three abutting rects -> one wire
         rect(40, 0, 96, 1000, 192),
@@ -31,12 +35,25 @@ fn min_width_wires_must_be_on_track_grid() {
         // a 2x-wide wire straddling an off-grid centerline -> not a 1x track -> exempt
         rect(40, 0, 672, 3000, 864),
     ];
-    let lib = Library { cells: vec![Cell { name: "top".into(), elements }], ..Library::default() };
+    let lib = Library {
+        cells: vec![Cell {
+            name: "top".into(),
+            elements,
+        }],
+        ..Library::default()
+    };
 
-    let track: Vec<_> =
-        check_library(&lib, None, &rules).unwrap().into_iter().filter(|v| v.rule == "track").collect();
+    let track: Vec<_> = check_library(&lib, None, &rules)
+        .unwrap()
+        .into_iter()
+        .filter(|v| v.rule == "track")
+        .collect();
 
     // the merged 3-rect off-grid wire counts once + the separate off-grid wire = 2;
     // the two on-grid wires and the 2x wire don't flag. Without the merge it would be 4.
-    assert_eq!(track.len(), 2, "off-grid min-width wires, merged per wire: {track:?}");
+    assert_eq!(
+        track.len(),
+        2,
+        "off-grid min-width wires, merged per wire: {track:?}"
+    );
 }

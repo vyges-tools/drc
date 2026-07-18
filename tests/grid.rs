@@ -11,7 +11,11 @@ use vyges_drc::layout::gds::{Cell, Element, Library};
 use vyges_drc::rules::Rules;
 
 fn rect(layer: i16, x0: i32, y0: i32, x1: i32, y1: i32) -> Element {
-    Element::Boundary { layer, datatype: 0, pts: vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)] }
+    Element::Boundary {
+        layer,
+        datatype: 0,
+        pts: vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)],
+    }
 }
 
 #[test]
@@ -29,12 +33,25 @@ fn offgrid_edges_flag_once_per_merged_wire() {
         // a separate off-grid wire elsewhere -> its own 4 endpoints
         rect(40, 0, 350, 800, 450),
     ];
-    let lib = Library { cells: vec![Cell { name: "top".into(), elements }], ..Library::default() };
+    let lib = Library {
+        cells: vec![Cell {
+            name: "top".into(),
+            elements,
+        }],
+        ..Library::default()
+    };
 
-    let grid: Vec<_> =
-        check_library(&lib, None, &rules).unwrap().into_iter().filter(|v| v.rule == "grid").collect();
+    let grid: Vec<_> = check_library(&lib, None, &rules)
+        .unwrap()
+        .into_iter()
+        .filter(|v| v.rule == "grid")
+        .collect();
 
     // 4 endpoints for the merged 3-rect wire + 4 for the separate wire = 8; the on-grid
     // wire contributes none. If the merge were missing, the split wire would report 12.
-    assert_eq!(grid.len(), 8, "off-grid vertices, merged per wire: {grid:?}");
+    assert_eq!(
+        grid.len(),
+        8,
+        "off-grid vertices, merged per wire: {grid:?}"
+    );
 }

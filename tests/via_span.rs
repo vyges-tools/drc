@@ -13,7 +13,11 @@ use vyges_drc::layout::gds::{Cell, Element, Library};
 use vyges_drc::rules::Rules;
 
 fn rect(layer: i16, x0: i32, y0: i32, x1: i32, y1: i32) -> Element {
-    Element::Boundary { layer, datatype: 0, pts: vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)] }
+    Element::Boundary {
+        layer,
+        datatype: 0,
+        pts: vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)],
+    }
 }
 
 #[test]
@@ -26,14 +30,20 @@ fn vias_must_span_full_wire_width() {
     //   192 dbu each side (fail, 384 dbu short).
     let elements = vec![
         rect(30, 0, 0, 2000, 136),
-        rect(25, 100, 0, 172, 136), // spans full width -> ok
+        rect(25, 100, 0, 172, 136),  // spans full width -> ok
         rect(25, 300, 32, 372, 104), // inset -> dev 64
         rect(25, 500, 32, 572, 104), // inset -> dev 64
         rect(50, 5000, 0, 5480, 3000),
         rect(45, 5000, 100, 5480, 196), // spans full width -> ok
         rect(45, 5192, 400, 5288, 496), // inset -> dev 384
     ];
-    let lib = Library { cells: vec![Cell { name: "top".into(), elements }], ..Library::default() };
+    let lib = Library {
+        cells: vec![Cell {
+            name: "top".into(),
+            elements,
+        }],
+        ..Library::default()
+    };
     let rules = Rules::parse("span 25 30\nspan 45 50\n").unwrap();
 
     let viols = check_library(&lib, None, &rules).unwrap();

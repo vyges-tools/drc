@@ -34,8 +34,8 @@ use crate::layout::boolean::{self, Op};
 use crate::layout::contour::trace_contours;
 use crate::layout::edges::{edges_not, ring_edges, separation, Axis, Edge};
 use crate::layout::flatten;
-use crate::layout::geom::{self, Rect};
 use crate::layout::gds::{Element, Library};
+use crate::layout::geom::{self, Rect};
 use crate::layout::index::RegionIndex;
 use crate::rules::{Layer, Rules};
 
@@ -48,8 +48,8 @@ pub struct Violation {
     pub limit: i64,
     /// The measured value, in the same unit as `limit` for that rule.
     pub value: i64,
-    pub a: Rect,            // the offending shape, spacing pair's first, or density window
-    pub b: Option<Rect>,    // the second shape, for a spacing violation
+    pub a: Rect,         // the offending shape, spacing pair's first, or density window
+    pub b: Option<Rect>, // the second shape, for a spacing violation
 }
 
 /// Overlap area of two axis-aligned rects in DB units² (0 if disjoint).
@@ -83,7 +83,11 @@ fn pick_top(lib: &Library, top: Option<&str>) -> Result<String, String> {
         None => Err(format!(
             "{} cells; pass a top cell ({})",
             lib.cells.len(),
-            lib.cells.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
+            lib.cells
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
     }
 }
@@ -92,16 +96,31 @@ fn pick_top(lib: &Library, top: Option<&str>) -> Result<String, String> {
 /// bounding box; `None` for elements we don't measure (Path/Text).
 fn elem_rect(e: &Element) -> (Layer, Option<Rect>) {
     let (num, dt, pts) = match e {
-        Element::Boundary { layer, datatype, pts } => (*layer, *datatype, pts),
-        Element::Box { layer, boxtype, pts } => (*layer, *boxtype, pts),
+        Element::Boundary {
+            layer,
+            datatype,
+            pts,
+        } => (*layer, *datatype, pts),
+        Element::Box {
+            layer,
+            boxtype,
+            pts,
+        } => (*layer, *boxtype, pts),
         _ => return (Layer::new(0, 0), None),
     };
-    (Layer::new(num, dt), Rect::from_boundary(pts).or_else(|| geom::bbox(pts)))
+    (
+        Layer::new(num, dt),
+        Rect::from_boundary(pts).or_else(|| geom::bbox(pts)),
+    )
 }
 
 /// Every edge of a closed polygon is axis-aligned.
 fn is_manhattan(pts: &[(i32, i32)]) -> bool {
-    let n = if pts.len() >= 2 && pts.first() == pts.last() { pts.len() - 1 } else { pts.len() };
+    let n = if pts.len() >= 2 && pts.first() == pts.last() {
+        pts.len() - 1
+    } else {
+        pts.len()
+    };
     (0..n).all(|i| {
         let (x1, y1) = pts[i];
         let (x2, y2) = pts[(i + 1) % n];
@@ -115,11 +134,23 @@ fn is_manhattan(pts: &[(i32, i32)]) -> bool {
 /// bbox, so unioning these gives the real merged geometry (enclosure needs this).
 fn elem_poly(e: &Element) -> (Layer, Option<Vec<(i32, i32)>>) {
     let (num, dt, pts) = match e {
-        Element::Boundary { layer, datatype, pts } => (*layer, *datatype, pts),
-        Element::Box { layer, boxtype, pts } => (*layer, *boxtype, pts),
+        Element::Boundary {
+            layer,
+            datatype,
+            pts,
+        } => (*layer, *datatype, pts),
+        Element::Box {
+            layer,
+            boxtype,
+            pts,
+        } => (*layer, *boxtype, pts),
         _ => return (Layer::new(0, 0), None),
     };
-    let poly = if is_manhattan(pts) { Some(pts.clone()) } else { geom::bbox(pts).map(|b| b.as_boundary()) };
+    let poly = if is_manhattan(pts) {
+        Some(pts.clone())
+    } else {
+        geom::bbox(pts).map(|b| b.as_boundary())
+    };
     (Layer::new(num, dt), poly)
 }
 
@@ -130,7 +161,11 @@ fn covered(q: &Rect, region: &[Rect], idx: &RegionIndex) -> bool {
     if q.x0 >= q.x1 || q.y0 >= q.y1 {
         return true;
     }
-    let local: Vec<Rect> = idx.overlaps(q).into_iter().map(|i| region[i as usize]).collect();
+    let local: Vec<Rect> = idx
+        .overlaps(q)
+        .into_iter()
+        .map(|i| region[i as usize])
+        .collect();
     if local.is_empty() {
         return false;
     }
@@ -143,10 +178,30 @@ fn covered(q: &Rect, region: &[Rect], idx: &RegionIndex) -> bool {
 /// 0=left, 1=right, 2=bottom, 3=top. Monotone in `d`, so a binary search is exact.
 fn side_margin(inner: &Rect, side: u8, region: &[Rect], idx: &RegionIndex, cap: i64) -> i64 {
     let strip = |d: i64| match side {
-        0 => Rect { x0: inner.x0 - d as i32, y0: inner.y0, x1: inner.x0, y1: inner.y1 },
-        1 => Rect { x0: inner.x1, y0: inner.y0, x1: inner.x1 + d as i32, y1: inner.y1 },
-        2 => Rect { x0: inner.x0, y0: inner.y0 - d as i32, x1: inner.x1, y1: inner.y0 },
-        _ => Rect { x0: inner.x0, y0: inner.y1, x1: inner.x1, y1: inner.y1 + d as i32 },
+        0 => Rect {
+            x0: inner.x0 - d as i32,
+            y0: inner.y0,
+            x1: inner.x0,
+            y1: inner.y1,
+        },
+        1 => Rect {
+            x0: inner.x1,
+            y0: inner.y0,
+            x1: inner.x1 + d as i32,
+            y1: inner.y1,
+        },
+        2 => Rect {
+            x0: inner.x0,
+            y0: inner.y0 - d as i32,
+            x1: inner.x1,
+            y1: inner.y0,
+        },
+        _ => Rect {
+            x0: inner.x0,
+            y0: inner.y1,
+            x1: inner.x1,
+            y1: inner.y1 + d as i32,
+        },
     };
     let (mut lo, mut hi) = (0i64, cap);
     while lo < hi {
@@ -166,7 +221,9 @@ struct Uf {
 }
 impl Uf {
     fn new(n: usize) -> Uf {
-        Uf { p: (0..n).collect() }
+        Uf {
+            p: (0..n).collect(),
+        }
     }
     fn find(&mut self, mut x: usize) -> usize {
         while self.p[x] != x {
@@ -206,8 +263,18 @@ fn perp_gap(ea: &Edge, eb: &Edge) -> Option<(i64, i32, i32, bool)> {
 /// **empty** (`space`). Measured on the merged region, so a wire drawn as many rectangles is
 /// one wide shape (width) and same-wire geometry is never a gap (space), and non-rectangular
 /// shapes are handled by their true outline rather than a bounding box.
-fn edge_spacing_check(layer: i16, min_d: i64, tiles: &[Rect], want_solid: bool, rule: &'static str, out: &mut Vec<Violation>) {
-    let edges: Vec<Edge> = trace_contours(tiles).iter().flat_map(|r| ring_edges(r)).collect();
+fn edge_spacing_check(
+    layer: i16,
+    min_d: i64,
+    tiles: &[Rect],
+    want_solid: bool,
+    rule: &'static str,
+    out: &mut Vec<Violation>,
+) {
+    let edges: Vec<Edge> = trace_contours(tiles)
+        .iter()
+        .flat_map(|r| ring_edges(r))
+        .collect();
     if edges.is_empty() {
         return;
     }
@@ -231,16 +298,34 @@ fn edge_spacing_check(layer: i16, min_d: i64, tiles: &[Rect], want_solid: bool, 
             if ea.axis() != eb.axis() {
                 continue;
             }
-            let Some((gap, lo, hi, horizontal)) = perp_gap(ea, eb) else { continue };
+            let Some((gap, lo, hi, horizontal)) = perp_gap(ea, eb) else {
+                continue;
+            };
             if gap == 0 || gap >= min_d {
                 continue;
             }
             let (neck, mid) = if horizontal {
                 let (y0, y1) = (ea.a.1.min(eb.a.1), ea.a.1.max(eb.a.1));
-                (Rect { x0: lo, y0, x1: hi, y1 }, ((lo + hi) / 2, (y0 + y1) / 2))
+                (
+                    Rect {
+                        x0: lo,
+                        y0,
+                        x1: hi,
+                        y1,
+                    },
+                    ((lo + hi) / 2, (y0 + y1) / 2),
+                )
             } else {
                 let (x0, x1) = (ea.a.0.min(eb.a.0), ea.a.0.max(eb.a.0));
-                (Rect { x0, y0: lo, x1, y1: hi }, ((x0 + x1) / 2, (lo + hi) / 2))
+                (
+                    Rect {
+                        x0,
+                        y0: lo,
+                        x1,
+                        y1: hi,
+                    },
+                    ((x0 + x1) / 2, (lo + hi) / 2),
+                )
             };
             if point_in_region(mid, tiles, &tidx) != want_solid {
                 continue;
@@ -252,8 +337,19 @@ fn edge_spacing_check(layer: i16, min_d: i64, tiles: &[Rect], want_solid: bool, 
                 continue;
             }
             // width points at the narrow neck; space reports the two facing edges.
-            let (a, b) = if want_solid { (neck, None) } else { (na, Some(nb)) };
-            out.push(Violation { rule, layer, limit: min_d, value: gap, a, b });
+            let (a, b) = if want_solid {
+                (neck, None)
+            } else {
+                (na, Some(nb))
+            };
+            out.push(Violation {
+                rule,
+                layer,
+                limit: min_d,
+                value: gap,
+                a,
+                b,
+            });
         }
     }
 }
@@ -301,7 +397,14 @@ fn edge_gap(a: &Edge, b: &Edge) -> i64 {
 
 /// Collapse (ea,eb) and (eb,ea) to one unordered pair — for same-class (space) spacing.
 fn dedup_edge_pairs(pairs: Vec<(Edge, Edge)>) -> Vec<(Edge, Edge)> {
-    let norm = |e: &Edge| (e.a.0.min(e.b.0), e.a.1.min(e.b.1), e.a.0.max(e.b.0), e.a.1.max(e.b.1));
+    let norm = |e: &Edge| {
+        (
+            e.a.0.min(e.b.0),
+            e.a.1.min(e.b.1),
+            e.a.0.max(e.b.0),
+            e.a.1.max(e.b.1),
+        )
+    };
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for p in pairs {
@@ -322,10 +425,22 @@ fn sep_violations(rule: &crate::rules::Sep, edges: &[Edge], out: &mut Vec<Violat
         let l = e.len();
         l >= lo && (hi == 0 || l <= hi)
     };
-    let a: Vec<Edge> = edges.iter().copied().filter(|e| in_class(e, rule.a_min, rule.a_max)).collect();
-    let b: Vec<Edge> = edges.iter().copied().filter(|e| in_class(e, rule.b_min, rule.b_max)).collect();
+    let a: Vec<Edge> = edges
+        .iter()
+        .copied()
+        .filter(|e| in_class(e, rule.a_min, rule.a_max))
+        .collect();
+    let b: Vec<Edge> = edges
+        .iter()
+        .copied()
+        .filter(|e| in_class(e, rule.b_min, rule.b_max))
+        .collect();
     let pairs = separation(&a, &b, rule.dist);
-    let pairs = if (rule.a_min, rule.a_max) == (rule.b_min, rule.b_max) { dedup_edge_pairs(pairs) } else { pairs };
+    let pairs = if (rule.a_min, rule.a_max) == (rule.b_min, rule.b_max) {
+        dedup_edge_pairs(pairs)
+    } else {
+        pairs
+    };
     for (ea, eb) in pairs {
         out.push(Violation {
             rule: "sep",
@@ -339,12 +454,20 @@ fn sep_violations(rule: &crate::rules::Sep, edges: &[Edge], out: &mut Vec<Violat
 }
 
 fn bbox_edge(e: &Edge) -> Rect {
-    Rect { x0: e.a.0.min(e.b.0), y0: e.a.1.min(e.b.1), x1: e.a.0.max(e.b.0), y1: e.a.1.max(e.b.1) }
+    Rect {
+        x0: e.a.0.min(e.b.0),
+        y0: e.a.1.min(e.b.1),
+        x1: e.a.0.max(e.b.0),
+        y1: e.a.1.max(e.b.1),
+    }
 }
 
 /// Outward normal of a directed edge (right of travel; solid on the left).
 fn outward_edge(e: &Edge) -> (i64, i64) {
-    ((e.b.1 - e.a.1).signum() as i64, -((e.b.0 - e.a.0).signum() as i64))
+    (
+        (e.b.1 - e.a.1).signum() as i64,
+        -((e.b.0 - e.a.0).signum() as i64),
+    )
 }
 
 /// Strict projection overlap of two parallel axis-aligned edges (side-to-side, not corner).
@@ -371,20 +494,36 @@ fn closest_pts(a: &Edge, b: &Edge) -> ((i32, i32), (i32, i32)) {
         let (dx, dy) = ((p.0 - q.0) as i64, (p.1 - q.1) as i64);
         dx * dx + dy * dy
     };
-    let cands = [(a.a, clamp(a.a, b)), (a.b, clamp(a.b, b)), (clamp(b.a, a), b.a), (clamp(b.b, a), b.b)];
+    let cands = [
+        (a.a, clamp(a.a, b)),
+        (a.b, clamp(a.b, b)),
+        (clamp(b.a, a), b.a),
+        (clamp(b.b, a), b.b),
+    ];
     *cands.iter().min_by_key(|(p, q)| dsq(*p, *q)).unwrap()
 }
 
 fn point_in_region(p: (i32, i32), tiles: &[Rect], idx: &RegionIndex) -> bool {
-    let q = Rect { x0: p.0, y0: p.1, x1: p.0, y1: p.1 };
-    idx.overlaps(&q)
-        .into_iter()
-        .any(|i| { let r = &tiles[i as usize]; r.x0 <= p.0 && p.0 <= r.x1 && r.y0 <= p.1 && p.1 <= r.y1 })
+    let q = Rect {
+        x0: p.0,
+        y0: p.1,
+        x1: p.0,
+        y1: p.1,
+    };
+    idx.overlaps(&q).into_iter().any(|i| {
+        let r = &tiles[i as usize];
+        r.x0 <= p.0 && p.0 <= r.x1 && r.y0 <= p.1 && p.1 <= r.y1
+    })
 }
 
 /// Corner-to-corner spacing: parallel non-projecting merged-boundary edges whose closest
 /// approach (at corners) is a `dist`-bounded gap across empty space that both edges face.
-fn c2c_violations(rule: &crate::rules::C2c, edges: &[Edge], tiles: &[Rect], out: &mut Vec<Violation>) {
+fn c2c_violations(
+    rule: &crate::rules::C2c,
+    edges: &[Edge],
+    tiles: &[Rect],
+    out: &mut Vec<Violation>,
+) {
     let d2 = rule.dist * rule.dist;
     let boxes: Vec<Rect> = edges.iter().map(bbox_edge).collect();
     let eidx = RegionIndex::build(&boxes);
@@ -420,8 +559,14 @@ fn c2c_violations(rule: &crate::rules::C2c, edges: &[Edge], tiles: &[Rect], out:
                 continue;
             }
             let (na, nb) = (bbox_edge(ea), bbox_edge(eb));
-            let key = if (na.x0, na.y0) <= (nb.x0, nb.y0) { (na, nb) } else { (nb, na) };
-            let k = (key.0.x0, key.0.y0, key.0.x1, key.0.y1, key.1.x0, key.1.y0, key.1.x1, key.1.y1);
+            let key = if (na.x0, na.y0) <= (nb.x0, nb.y0) {
+                (na, nb)
+            } else {
+                (nb, na)
+            };
+            let k = (
+                key.0.x0, key.0.y0, key.0.x1, key.0.y1, key.1.x0, key.1.y0, key.1.x1, key.1.y1,
+            );
             if !seen.insert(k) {
                 continue;
             }
@@ -489,7 +634,14 @@ pub fn check_library(
             for r in shapes {
                 let area = (r.x1 - r.x0) as i64 * (r.y1 - r.y0) as i64;
                 if area < min_a {
-                    viols.push(Violation { rule: "area", layer: layer.num, limit: min_a, value: area, a: *r, b: None });
+                    viols.push(Violation {
+                        rule: "area",
+                        layer: layer.num,
+                        limit: min_a,
+                        value: area,
+                        a: *r,
+                        b: None,
+                    });
                 }
             }
         }
@@ -499,8 +651,10 @@ pub fn check_library(
     }
     // antenna is a per-net (connectivity) check — needs all layers together
     if !rules.antenna.is_empty() {
-        let all: Vec<(Layer, Rect)> =
-            by_layer.iter().flat_map(|(&l, shapes)| shapes.iter().map(move |r| (l, *r))).collect();
+        let all: Vec<(Layer, Rect)> = by_layer
+            .iter()
+            .flat_map(|(&l, shapes)| shapes.iter().map(move |r| (l, *r)))
+            .collect();
         antenna_violations(&all, &rules.connect, &rules.antenna, &mut viols);
     }
     // enclosure is cross-layer: inner inside the merged outer region
@@ -539,19 +693,28 @@ pub fn check_library(
     // sep is per-layer directional edge spacing on the merged boundary
     for rule in &rules.sep {
         let tiles = merged_outer.get(&rule.layer).unwrap_or(&no_outer);
-        let edges: Vec<Edge> = trace_contours(tiles).iter().flat_map(|r| ring_edges(r)).collect();
+        let edges: Vec<Edge> = trace_contours(tiles)
+            .iter()
+            .flat_map(|r| ring_edges(r))
+            .collect();
         sep_violations(rule, &edges, &mut viols);
     }
     // c2c is per-layer corner-to-corner spacing on the merged boundary
     for rule in &rules.c2c {
         let tiles = merged_outer.get(&rule.layer).unwrap_or(&no_outer);
-        let edges: Vec<Edge> = trace_contours(tiles).iter().flat_map(|r| ring_edges(r)).collect();
+        let edges: Vec<Edge> = trace_contours(tiles)
+            .iter()
+            .flat_map(|r| ring_edges(r))
+            .collect();
         c2c_violations(rule, &edges, tiles, &mut viols);
     }
     // runlen is per-layer parallel-run-length on the merged boundary
     for rule in &rules.runlen {
         let tiles = merged_outer.get(&rule.layer).unwrap_or(&no_outer);
-        let edges: Vec<Edge> = trace_contours(tiles).iter().flat_map(|r| ring_edges(r)).collect();
+        let edges: Vec<Edge> = trace_contours(tiles)
+            .iter()
+            .flat_map(|r| ring_edges(r))
+            .collect();
         runlen_violations(rule, &edges, &mut viols);
     }
     // grid is per-layer (vertices must lie on a manufacturing grid)
@@ -576,7 +739,12 @@ pub fn check_library(
 /// v0 sums per-shape overlaps **without unioning** the layer first, so overlapping
 /// same-layer shapes can over-count coverage (the same not-pre-merged caveat as
 /// width/space). Proper density unions the layer first; that is the depth pass.
-fn density_violations(layer: i16, shapes: &[Rect], d: crate::rules::Density, out: &mut Vec<Violation>) {
+fn density_violations(
+    layer: i16,
+    shapes: &[Rect],
+    d: crate::rules::Density,
+    out: &mut Vec<Violation>,
+) {
     let Some(bb) = bbox(shapes) else { return };
     let w = d.window;
     let mut ty0 = bb.y0;
@@ -591,9 +759,23 @@ fn density_violations(layer: i16, shapes: &[Rect], d: crate::rules::Density, out
                 let covered: i64 = shapes.iter().map(|s| overlap_area(s, &tile)).sum();
                 let pct = (100 * covered / tile_area).clamp(0, 100);
                 if pct < d.min_pct {
-                    out.push(Violation { rule: "density", layer, limit: d.min_pct, value: pct, a: tile, b: None });
+                    out.push(Violation {
+                        rule: "density",
+                        layer,
+                        limit: d.min_pct,
+                        value: pct,
+                        a: tile,
+                        b: None,
+                    });
                 } else if pct > d.max_pct {
-                    out.push(Violation { rule: "density", layer, limit: d.max_pct, value: pct, a: tile, b: None });
+                    out.push(Violation {
+                        rule: "density",
+                        layer,
+                        limit: d.max_pct,
+                        value: pct,
+                        a: tile,
+                        b: None,
+                    });
                 }
             }
             tx0 = tx1.max(tx0 + 1);
@@ -628,13 +810,30 @@ fn enclosure_violations(
     for inner in inners {
         // `inner` must sit inside the merged outer region; else the not-enclosed sentinel.
         if !covered(inner, outer, &idx) {
-            out.push(Violation { rule: "enclosure", layer: rule.inner.num, limit: rule.min, value: -1, a: *inner, b: None });
+            out.push(Violation {
+                rule: "enclosure",
+                layer: rule.inner.num,
+                limit: rule.min,
+                value: -1,
+                a: *inner,
+                b: None,
+            });
             continue;
         }
         // min enclosure over the four sides (capped at `min`; adequate ⇒ no violation).
-        let m = (0..4).map(|s| side_margin(inner, s, outer, &idx, rule.min)).min().unwrap_or(0);
+        let m = (0..4)
+            .map(|s| side_margin(inner, s, outer, &idx, rule.min))
+            .min()
+            .unwrap_or(0);
         if m < rule.min {
-            out.push(Violation { rule: "enclosure", layer: rule.inner.num, limit: rule.min, value: m, a: *inner, b: None });
+            out.push(Violation {
+                rule: "enclosure",
+                layer: rule.inner.num,
+                limit: rule.min,
+                value: m,
+                a: *inner,
+                b: None,
+            });
         }
     }
 }
@@ -654,7 +853,9 @@ fn span_violations(
     by_layer: &BTreeMap<Layer, Vec<Rect>>,
     out: &mut Vec<Violation>,
 ) {
-    let Some(cuts) = by_layer.get(&rule.cut) else { return };
+    let Some(cuts) = by_layer.get(&rule.cut) else {
+        return;
+    };
     let empty = Vec::new();
     let metals = by_layer.get(&rule.metal).unwrap_or(&empty);
     for cut in cuts {
@@ -674,7 +875,14 @@ fn span_violations(
             (cut.y0 - m.y0).abs() as i64 + (cut.y1 - m.y1).abs() as i64
         };
         if dev > 0 {
-            out.push(Violation { rule: "span", layer: rule.cut.num, limit: 0, value: dev, a: *cut, b: Some(*m) });
+            out.push(Violation {
+                rule: "span",
+                layer: rule.cut.num,
+                limit: 0,
+                value: dev,
+                a: *cut,
+                b: Some(*m),
+            });
         }
     }
 }
@@ -705,7 +913,14 @@ fn venc_violations(
     let idx = RegionIndex::build(outer);
     for inner in inners {
         if !covered(inner, outer, &idx) {
-            out.push(Violation { rule: "venc", layer: rule.inner.num, limit: rule.major, value: -1, a: *inner, b: None });
+            out.push(Violation {
+                rule: "venc",
+                layer: rule.inner.num,
+                limit: rule.major,
+                value: -1,
+                a: *inner,
+                b: None,
+            });
             continue;
         }
         // per-side enclosure against the merged outer region (capped at `major`).
@@ -723,7 +938,14 @@ fn venc_violations(
             best_major = best_major.max(b.max(t));
         }
         if best_major < rule.major {
-            out.push(Violation { rule: "venc", layer: rule.inner.num, limit: rule.major, value: best_major, a: *inner, b: None });
+            out.push(Violation {
+                rule: "venc",
+                layer: rule.inner.num,
+                limit: rule.major,
+                value: best_major,
+                a: *inner,
+                b: None,
+            });
         }
     }
 }
@@ -731,10 +953,22 @@ fn venc_violations(
 /// The four boundary edges of a via rectangle (direction is irrelevant to coincidence).
 fn via_edges(v: &Rect) -> [Edge; 4] {
     [
-        Edge { a: (v.x0, v.y0), b: (v.x1, v.y0) },
-        Edge { a: (v.x1, v.y0), b: (v.x1, v.y1) },
-        Edge { a: (v.x1, v.y1), b: (v.x0, v.y1) },
-        Edge { a: (v.x0, v.y1), b: (v.x0, v.y0) },
+        Edge {
+            a: (v.x0, v.y0),
+            b: (v.x1, v.y0),
+        },
+        Edge {
+            a: (v.x1, v.y0),
+            b: (v.x1, v.y1),
+        },
+        Edge {
+            a: (v.x1, v.y1),
+            b: (v.x0, v.y1),
+        },
+        Edge {
+            a: (v.x0, v.y1),
+            b: (v.x0, v.y0),
+        },
     ]
 }
 
@@ -771,11 +1005,26 @@ fn corner_violations(
         }
         // portions of the via's edges that are NOT on the merged outer boundary
         let nonc = edges_not(&via_edges(via), &local);
-        let nh: Vec<Edge> = nonc.iter().copied().filter(|e| e.axis() == Axis::Horizontal).collect();
-        let nv: Vec<Edge> = nonc.iter().copied().filter(|e| e.axis() == Axis::Vertical).collect();
+        let nh: Vec<Edge> = nonc
+            .iter()
+            .copied()
+            .filter(|e| e.axis() == Axis::Horizontal)
+            .collect();
+        let nv: Vec<Edge> = nonc
+            .iter()
+            .copied()
+            .filter(|e| e.axis() == Axis::Vertical)
+            .collect();
         // a convex corner where a non-coincident H edge meets a non-coincident V edge
         if nh.iter().any(|h| nv.iter().any(|v| shares_endpoint(h, v))) {
-            out.push(Violation { rule: "corner", layer: inner_layer, limit: 0, value: 1, a: *via, b: None });
+            out.push(Violation {
+                rule: "corner",
+                layer: inner_layer,
+                limit: 0,
+                value: 1,
+                a: *via,
+                b: None,
+            });
         }
     }
 }
@@ -797,11 +1046,21 @@ fn gap_rect(a: &Edge, b: &Edge, horizontal: bool) -> Rect {
     if horizontal {
         let xl = a.a.0.min(a.b.0).max(b.a.0.min(b.b.0));
         let xr = a.a.0.max(a.b.0).min(b.a.0.max(b.b.0));
-        Rect { x0: xl, y0: a.a.1.min(b.a.1), x1: xr, y1: a.a.1.max(b.a.1) }
+        Rect {
+            x0: xl,
+            y0: a.a.1.min(b.a.1),
+            x1: xr,
+            y1: a.a.1.max(b.a.1),
+        }
     } else {
         let yl = a.a.1.min(a.b.1).max(b.a.1.min(b.b.1));
         let yr = a.a.1.max(a.b.1).min(b.a.1.max(b.b.1));
-        Rect { x0: a.a.0.min(b.a.0), y0: yl, x1: a.a.0.max(b.a.0), y1: yr }
+        Rect {
+            x0: a.a.0.min(b.a.0),
+            y0: yl,
+            x1: a.a.0.max(b.a.0),
+            y1: yr,
+        }
     }
 }
 
@@ -828,8 +1087,11 @@ fn ring_bbox(ring: &[(i32, i32)]) -> Rect {
 /// rectangles, merge them, and flag each merged run shorter than `min_run`.
 fn runlen_violations(rule: &crate::rules::RunLen, edges: &[Edge], out: &mut Vec<Violation>) {
     for horizontal in [true, false] {
-        let cls: Vec<Edge> =
-            edges.iter().copied().filter(|e| (e.axis() == Axis::Horizontal) == horizontal).collect();
+        let cls: Vec<Edge> = edges
+            .iter()
+            .copied()
+            .filter(|e| (e.axis() == Axis::Horizontal) == horizontal)
+            .collect();
         let gaps: Vec<Vec<(i32, i32)>> = separation(&cls, &cls, rule.space)
             .iter()
             .map(|(a, b)| gap_rect(a, b, horizontal).as_boundary())
@@ -840,9 +1102,20 @@ fn runlen_violations(rule: &crate::rules::RunLen, edges: &[Edge], out: &mut Vec<
                 continue; // outer rings are the runs
             }
             let bb = ring_bbox(&ring);
-            let run = (if horizontal { bb.x1 - bb.x0 } else { bb.y1 - bb.y0 }) as i64;
+            let run = (if horizontal {
+                bb.x1 - bb.x0
+            } else {
+                bb.y1 - bb.y0
+            }) as i64;
             if run < rule.min_run {
-                out.push(Violation { rule: "runlen", layer: rule.layer.num, limit: rule.min_run, value: run, a: bb, b: None });
+                out.push(Violation {
+                    rule: "runlen",
+                    layer: rule.layer.num,
+                    limit: rule.min_run,
+                    value: run,
+                    a: bb,
+                    b: None,
+                });
             }
         }
     }
@@ -877,7 +1150,14 @@ fn grid_violations(rule: &crate::rules::Grid, shapes: &[Rect], out: &mut Vec<Vio
     merged_edge_endpoints(true, vert, &mut pts);
     merged_edge_endpoints(false, horiz, &mut pts);
     for (x, y) in pts {
-        out.push(Violation { rule: "grid", layer: rule.layer.num, limit: 0, value: 0, a: Rect::new(x, y, x, y), b: None });
+        out.push(Violation {
+            rule: "grid",
+            layer: rule.layer.num,
+            limit: 0,
+            value: 0,
+            a: Rect::new(x, y, x, y),
+            b: None,
+        });
     }
 }
 
@@ -902,7 +1182,11 @@ fn track_violations(rule: &crate::rules::Track, shapes: &[Rect], out: &mut Vec<V
         }
         // width axis = the shorter dimension (horizontal wire → y, vertical → x; tie → y)
         let horizontal = h <= w;
-        let (lo, hi) = if horizontal { (r.y0 as i64, r.y1 as i64) } else { (r.x0 as i64, r.x1 as i64) };
+        let (lo, hi) = if horizontal {
+            (r.y0 as i64, r.y1 as i64)
+        } else {
+            (r.x0 as i64, r.x1 as i64)
+        };
         if lo % rule.width != 0 || hi % rule.width != 0 {
             continue; // width-edges off the width grid → a grid rule's concern, not this
         }
@@ -949,7 +1233,14 @@ fn emit_merged_track(
             } else {
                 Rect::new(cl - half, a, cl + half, b)
             };
-            out.push(Violation { rule: "track", layer, limit: 0, value: 0, a: rect, b: None });
+            out.push(Violation {
+                rule: "track",
+                layer,
+                limit: 0,
+                value: 0,
+                a: rect,
+                b: None,
+            });
         }
     }
 }
@@ -1009,7 +1300,11 @@ fn keeps_gap(a: &Rect, other: &Rect, gap: i64) -> bool {
 /// exactly); clearance to already-placed fill stays a linear scan (a live index is
 /// depth); fill goes on the rule's layer at datatype 0 (a dedicated fill datatype is a
 /// follow-up); the fill region is the design bounding box.
-pub fn fill_library(lib: &Library, top: Option<&str>, rules: &Rules) -> Result<(Library, usize), String> {
+pub fn fill_library(
+    lib: &Library,
+    top: Option<&str>,
+    rules: &Rules,
+) -> Result<(Library, usize), String> {
     let top = pick_top(lib, top)?;
     let cell = flatten::flatten(lib, &top)?;
 
@@ -1032,7 +1327,11 @@ pub fn fill_library(lib: &Library, top: Option<&str>, rules: &Rules) -> Result<(
         let existing = by_layer.get(&rule.layer).unwrap_or(&empty);
         let placed = fill_region(rule, &region, existing);
         for r in &placed {
-            new_elems.push(Element::Boundary { layer: rule.layer.num, datatype: rule.layer.dt, pts: r.as_boundary() });
+            new_elems.push(Element::Boundary {
+                layer: rule.layer.num,
+                datatype: rule.layer.dt,
+                pts: r.as_boundary(),
+            });
         }
     }
 
@@ -1097,7 +1396,9 @@ struct UnionFind {
 }
 impl UnionFind {
     fn new(n: usize) -> UnionFind {
-        UnionFind { parent: (0..n).collect() }
+        UnionFind {
+            parent: (0..n).collect(),
+        }
     }
     fn find(&mut self, mut x: usize) -> usize {
         while self.parent[x] != x {
@@ -1130,7 +1431,10 @@ fn antenna_violations(
 ) {
     let n = all.len();
     let connects = |la: Layer, lb: Layer| -> bool {
-        la == lb || connect.iter().any(|&(x, y)| (x == la && y == lb) || (x == lb && y == la))
+        la == lb
+            || connect
+                .iter()
+                .any(|&(x, y)| (x == la && y == lb) || (x == lb && y == la))
     };
     // Connectivity only unions shapes that touch/overlap; a RegionIndex over all
     // shapes returns the touching candidates (halo of 1 dbu catches abutment too),
@@ -1159,13 +1463,19 @@ fn antenna_violations(
     }
     for idxs in nets.values() {
         for rule in rules {
-            let gate_area: i64 =
-                idxs.iter().filter(|&&i| all[i].0 == rule.gate).map(|&i| rect_area(&all[i].1)).sum();
+            let gate_area: i64 = idxs
+                .iter()
+                .filter(|&&i| all[i].0 == rule.gate)
+                .map(|&i| rect_area(&all[i].1))
+                .sum();
             if gate_area <= 0 {
                 continue; // no gate on this net — antenna ratio is not applicable
             }
-            let cond: Vec<Rect> =
-                idxs.iter().filter(|&&i| all[i].0 == rule.conductor).map(|&i| all[i].1).collect();
+            let cond: Vec<Rect> = idxs
+                .iter()
+                .filter(|&&i| all[i].0 == rule.conductor)
+                .map(|&i| all[i].1)
+                .collect();
             let cond_area: i64 = cond.iter().map(rect_area).sum();
             if cond_area <= 0 {
                 continue;
@@ -1214,7 +1524,13 @@ mod tests {
     }
 
     fn lib_with(elems: Vec<Element>) -> Library {
-        Library { cells: vec![Cell { name: "top".into(), elements: elems }], ..Library::default() }
+        Library {
+            cells: vec![Cell {
+                name: "top".into(),
+                elements: elems,
+            }],
+            ..Library::default()
+        }
     }
 
     #[test]
@@ -1237,7 +1553,10 @@ mod tests {
     #[test]
     fn catches_min_space() {
         // two met1 (layer 68) wires 60 apart in x, overlapping in y; min space 100
-        let lib = lib_with(vec![rect_elem(68, 0, 0, 100, 100), rect_elem(68, 160, 0, 260, 100)]);
+        let lib = lib_with(vec![
+            rect_elem(68, 0, 0, 100, 100),
+            rect_elem(68, 160, 0, 260, 100),
+        ]);
         let rules = Rules::parse("space 68 100\n").unwrap();
         let v = check_library(&lib, None, &rules).unwrap();
         assert_eq!(v.len(), 1);
@@ -1259,7 +1578,10 @@ mod tests {
     fn density_below_min_flags_the_window() {
         // two small shapes in a wide bbox -> sparse coverage. bbox 0..1000 × 0..100,
         // one 1000-window tile, covered 20000 / 100000 = 20%. min 50% -> violation.
-        let lib = lib_with(vec![rect_elem(70, 0, 0, 100, 100), rect_elem(70, 900, 0, 1000, 100)]);
+        let lib = lib_with(vec![
+            rect_elem(70, 0, 0, 100, 100),
+            rect_elem(70, 900, 0, 1000, 100),
+        ]);
         let rules = Rules::parse("density 70 50 90 1000\n").unwrap();
         let v = check_library(&lib, None, &rules).unwrap();
         assert_eq!(v.len(), 1);
@@ -1280,7 +1602,10 @@ mod tests {
     fn density_in_range_passes() {
         // bbox 0..1000 × 0..100; a 500-wide fill covers 50%. A degenerate far edge at
         // x=1000 only widens the bbox (zero area). 50% is within 10–90% -> clean.
-        let lib = lib_with(vec![rect_elem(70, 0, 0, 500, 100), rect_elem(70, 1000, 0, 1000, 100)]);
+        let lib = lib_with(vec![
+            rect_elem(70, 0, 0, 500, 100),
+            rect_elem(70, 1000, 0, 1000, 100),
+        ]);
         let rules = Rules::parse("density 70 10 90 1000\n").unwrap();
         assert!(check_library(&lib, None, &rules).unwrap().is_empty());
     }
@@ -1290,8 +1615,8 @@ mod tests {
         // gate poly (layer 5, area 100) connected to a big metal (layer 68, area
         // 50000) via `connect 5 68`. ratio 500 > max 100 -> antenna violation.
         let lib = lib_with(vec![
-            rect_elem(5, 0, 0, 10, 10),       // gate, area 100
-            rect_elem(68, 0, 0, 500, 100),    // conductor, area 50000, overlaps the gate
+            rect_elem(5, 0, 0, 10, 10),    // gate, area 100
+            rect_elem(68, 0, 0, 500, 100), // conductor, area 50000, overlaps the gate
         ]);
         let rules = Rules::parse("connect 5 68\nantenna 68 5 100\n").unwrap();
         let v = check_library(&lib, None, &rules).unwrap();
@@ -1305,7 +1630,10 @@ mod tests {
     #[test]
     fn antenna_under_ratio_passes_and_no_gate_is_skipped() {
         // (a) within ratio: metal area 4000 / gate 100 = 40 < max 100 -> clean.
-        let ok = lib_with(vec![rect_elem(5, 0, 0, 10, 10), rect_elem(68, 0, 0, 400, 10)]);
+        let ok = lib_with(vec![
+            rect_elem(5, 0, 0, 10, 10),
+            rect_elem(68, 0, 0, 400, 10),
+        ]);
         let rules = Rules::parse("connect 5 68\nantenna 68 5 100\n").unwrap();
         assert!(check_library(&ok, None, &rules).unwrap().is_empty());
 
@@ -1323,14 +1651,24 @@ mod tests {
             rect_elem(68, 5000, 5000, 9000, 6000), // metal far away, disjoint
         ]);
         let rules = Rules::parse("connect 5 68\nantenna 68 5 1\n").unwrap();
-        assert!(check_library(&lib, None, &rules).unwrap().is_empty(), "disjoint -> no shared net");
+        assert!(
+            check_library(&lib, None, &rules).unwrap().is_empty(),
+            "disjoint -> no shared net"
+        );
     }
 
     #[test]
     fn enclosure_margin_pass_and_fail() {
         // outer 68 box 0..200, inner 66 box 50..150 -> 50 margin on every side
-        let lib = lib_with(vec![rect_elem(68, 0, 0, 200, 200), rect_elem(66, 50, 50, 150, 150)]);
-        assert!(check_library(&lib, None, &Rules::parse("enclosure 68 66 40\n").unwrap()).unwrap().is_empty());
+        let lib = lib_with(vec![
+            rect_elem(68, 0, 0, 200, 200),
+            rect_elem(66, 50, 50, 150, 150),
+        ]);
+        assert!(
+            check_library(&lib, None, &Rules::parse("enclosure 68 66 40\n").unwrap())
+                .unwrap()
+                .is_empty()
+        );
         let v = check_library(&lib, None, &Rules::parse("enclosure 68 66 60\n").unwrap()).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!((v[0].rule, v[0].value, v[0].limit), ("enclosure", 50, 60));
@@ -1339,7 +1677,10 @@ mod tests {
     #[test]
     fn enclosure_inner_outside_is_not_enclosed() {
         // inner sticks out past the outer -> not enclosed by any single outer shape
-        let lib = lib_with(vec![rect_elem(68, 0, 0, 100, 100), rect_elem(66, 80, 80, 160, 160)]);
+        let lib = lib_with(vec![
+            rect_elem(68, 0, 0, 100, 100),
+            rect_elem(66, 80, 80, 160, 160),
+        ]);
         let v = check_library(&lib, None, &Rules::parse("enclosure 68 66 10\n").unwrap()).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].value, -1, "not-enclosed sentinel");
@@ -1354,18 +1695,27 @@ mod tests {
         let rules = Rules::parse("span 25 34\n").unwrap();
 
         // exact span 0..100 in x -> clean
-        let ok = lib_with(vec![rect_elem(34, 0, 0, 100, 600), rect_elem(25, 0, 250, 100, 350)]);
+        let ok = lib_with(vec![
+            rect_elem(34, 0, 0, 100, 600),
+            rect_elem(25, 0, 250, 100, 350),
+        ]);
         assert!(check_library(&ok, None, &rules).unwrap().is_empty());
 
         // 60-wide cut inset (20..80) -> 20 short on each side, dev 40
-        let narrow = lib_with(vec![rect_elem(34, 0, 0, 100, 600), rect_elem(25, 20, 250, 80, 350)]);
+        let narrow = lib_with(vec![
+            rect_elem(34, 0, 0, 100, 600),
+            rect_elem(25, 20, 250, 80, 350),
+        ]);
         let v = check_library(&narrow, None, &rules).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!((v[0].rule, v[0].value, v[0].limit), ("span", 40, 0));
         assert!(v[0].b.is_some());
 
         // cut protruding past the metal low edge (-10..100) -> dev 10
-        let over = lib_with(vec![rect_elem(34, 0, 0, 100, 600), rect_elem(25, -10, 250, 100, 350)]);
+        let over = lib_with(vec![
+            rect_elem(34, 0, 0, 100, 600),
+            rect_elem(25, -10, 250, 100, 350),
+        ]);
         let v = check_library(&over, None, &rules).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].value, 10);
@@ -1380,11 +1730,23 @@ mod tests {
         // width=96, pitch=192, offset=48: a 96-tall horizontal wire's y-centerline must be
         // 48 + 192N. y 0..96 -> cl 48 (on grid); y 96..192 -> cl 144 (off -> flag).
         let rules = Rules::parse("track 40 96 192 48\n").unwrap();
-        let t = |lib: &Library| check_library(lib, None, &rules).unwrap().into_iter().filter(|v| v.rule == "track").count();
+        let t = |lib: &Library| {
+            check_library(lib, None, &rules)
+                .unwrap()
+                .into_iter()
+                .filter(|v| v.rule == "track")
+                .count()
+        };
         assert_eq!(t(&lib_with(vec![rect_elem(40, 0, 0, 500, 96)])), 0); // on-grid wire
         assert_eq!(t(&lib_with(vec![rect_elem(40, 0, 96, 500, 192)])), 1); // off-grid (cl 144)
-        // off-grid wire drawn as two abutting rects -> merged -> still one
-        assert_eq!(t(&lib_with(vec![rect_elem(40, 0, 96, 500, 192), rect_elem(40, 500, 96, 900, 192)])), 1);
+                                                                           // off-grid wire drawn as two abutting rects -> merged -> still one
+        assert_eq!(
+            t(&lib_with(vec![
+                rect_elem(40, 0, 96, 500, 192),
+                rect_elem(40, 500, 96, 900, 192)
+            ])),
+            1
+        );
         // a 2x-wide (192-tall) wire is not a 1x track -> not checked
         assert_eq!(t(&lib_with(vec![rect_elem(40, 0, 96, 500, 288)])), 0);
         // a min-width wire with an off-96-grid edge -> skipped (a grid rule's concern)
@@ -1396,14 +1758,23 @@ mod tests {
         // ypitch=100, x free: a wire off-grid in y flags its two horizontal edges'
         // endpoint vertices (4 points); a wire drawn as abutting rects merges to the same 4.
         let rules = Rules::parse("grid 40 1 100\n").unwrap();
-        let grid = |lib: &Library| check_library(lib, None, &rules).unwrap().into_iter().filter(|v| v.rule == "grid").count();
+        let grid = |lib: &Library| {
+            check_library(lib, None, &rules)
+                .unwrap()
+                .into_iter()
+                .filter(|v| v.rule == "grid")
+                .count()
+        };
 
         // on-grid wire (y 0..100) -> clean
         assert_eq!(grid(&lib_with(vec![rect_elem(40, 0, 0, 500, 100)])), 0);
         // off-grid wire (y 50..150): y0=50, y1=150 both off the 100-grid -> 4 endpoints
         assert_eq!(grid(&lib_with(vec![rect_elem(40, 0, 50, 500, 150)])), 4);
         // same wire as two abutting rects -> collinear edges merge -> still 4, not 8
-        let split = lib_with(vec![rect_elem(40, 0, 50, 500, 150), rect_elem(40, 500, 50, 1000, 150)]);
+        let split = lib_with(vec![
+            rect_elem(40, 0, 50, 500, 150),
+            rect_elem(40, 500, 50, 1000, 150),
+        ]);
         assert_eq!(grid(&split), 4);
     }
 
@@ -1415,18 +1786,30 @@ mod tests {
 
         // via fills the wire height (y margins 0) but is deep inside along x -> the
         // x-axis qualifies (100 & 1828), so it passes despite the 0 y-margins.
-        let ok = lib_with(vec![rect_elem(30, 0, 0, 2000, 136), rect_elem(25, 100, 0, 172, 136)]);
+        let ok = lib_with(vec![
+            rect_elem(30, 0, 0, 2000, 136),
+            rect_elem(25, 100, 0, 172, 136),
+        ]);
         assert!(check_library(&ok, None, &rules).unwrap().is_empty());
 
         // via inset only 4 dbu on every side of a small pad -> neither axis meets the
         // minor on both sides -> violation, enclosed (value 0, not -1).
-        let bad = lib_with(vec![rect_elem(30, 0, 0, 100, 100), rect_elem(25, 4, 4, 96, 96)]);
+        let bad = lib_with(vec![
+            rect_elem(30, 0, 0, 100, 100),
+            rect_elem(25, 4, 4, 96, 96),
+        ]);
         let v = check_library(&bad, None, &rules).unwrap();
         assert_eq!(v.len(), 1);
-        assert_eq!((v[0].rule, v[0].layer, v[0].limit, v[0].value), ("venc", 25, 20, 0));
+        assert_eq!(
+            (v[0].rule, v[0].layer, v[0].limit, v[0].value),
+            ("venc", 25, 20, 0)
+        );
 
         // via not inside any single outer shape -> not enclosed sentinel (-1)
-        let orphan = lib_with(vec![rect_elem(30, 0, 0, 100, 100), rect_elem(25, 5000, 5000, 5100, 5100)]);
+        let orphan = lib_with(vec![
+            rect_elem(30, 0, 0, 100, 100),
+            rect_elem(25, 5000, 5000, 5100, 5100),
+        ]);
         let v = check_library(&orphan, None, &rules).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].value, -1);
@@ -1436,11 +1819,21 @@ mod tests {
     fn corner_via_must_match_metal_width() {
         // metal wire 100×20; a via spanning the full height sits on the top and bottom
         // metal boundary — no corner departs the metal on both of its edges. Passes.
-        let ok = lib_with(vec![rect_elem(19, 0, 0, 100, 20), rect_elem(18, 40, 0, 60, 20)]);
-        assert!(check_library(&ok, None, &Rules::parse("corner 19 18\n").unwrap()).unwrap().is_empty());
+        let ok = lib_with(vec![
+            rect_elem(19, 0, 0, 100, 20),
+            rect_elem(18, 40, 0, 60, 20),
+        ]);
+        assert!(
+            check_library(&ok, None, &Rules::parse("corner 19 18\n").unwrap())
+                .unwrap()
+                .is_empty()
+        );
         // a via floating inside the metal (reaching no edge) — every corner departs the
         // merged boundary on both edges. Flagged.
-        let bad = lib_with(vec![rect_elem(19, 0, 0, 100, 20), rect_elem(18, 40, 5, 60, 15)]);
+        let bad = lib_with(vec![
+            rect_elem(19, 0, 0, 100, 20),
+            rect_elem(18, 40, 5, 60, 15),
+        ]);
         let v = check_library(&bad, None, &Rules::parse("corner 19 18\n").unwrap()).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!((v[0].rule, v[0].layer), ("corner", 18));
@@ -1450,53 +1843,85 @@ mod tests {
             rect_elem(18, 40, 5, 60, 15),
             rect_elem(18, 40, 5, 60, 15),
         ]);
-        assert_eq!(check_library(&dup, None, &Rules::parse("corner 19 18\n").unwrap()).unwrap().len(), 1);
+        assert_eq!(
+            check_library(&dup, None, &Rules::parse("corner 19 18\n").unwrap())
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn sep_flags_facing_gap_and_dedups() {
         // two squares 4 dbu apart on layer 19; same-class (self-)spacing within dist 5
         // finds the single facing pair (A's right edge vs B's left edge), deduped.
-        let lib = lib_with(vec![rect_elem(19, 0, 0, 10, 10), rect_elem(19, 14, 0, 24, 10)]);
+        let lib = lib_with(vec![
+            rect_elem(19, 0, 0, 10, 10),
+            rect_elem(19, 14, 0, 24, 10),
+        ]);
         let v = check_library(&lib, None, &Rules::parse("sep 19 1 20 1 20 5\n").unwrap()).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!((v[0].rule, v[0].value, v[0].limit), ("sep", 4, 5));
         // gap == dist is not a violation
-        assert!(check_library(&lib, None, &Rules::parse("sep 19 1 20 1 20 4\n").unwrap()).unwrap().is_empty());
+        assert!(
+            check_library(&lib, None, &Rules::parse("sep 19 1 20 1 20 4\n").unwrap())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn c2c_flags_diagonal_corner_gap() {
         // two squares whose nearest corners are sqrt(32)≈5.66 dbu apart, diagonally
-        let lib = lib_with(vec![rect_elem(19, 0, 0, 10, 10), rect_elem(19, 14, 14, 24, 24)]);
+        let lib = lib_with(vec![
+            rect_elem(19, 0, 0, 10, 10),
+            rect_elem(19, 14, 14, 24, 24),
+        ]);
         // dist 6 catches it — one horizontal-edge pair and one vertical-edge pair
         let v = check_library(&lib, None, &Rules::parse("c2c 19 6\n").unwrap()).unwrap();
         assert_eq!(v.len(), 2);
         assert!(v.iter().all(|x| x.rule == "c2c"));
         // dist 5 < 5.66: clean
-        assert!(check_library(&lib, None, &Rules::parse("c2c 19 5\n").unwrap()).unwrap().is_empty());
+        assert!(
+            check_library(&lib, None, &Rules::parse("c2c 19 5\n").unwrap())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn runlen_flags_short_parallel_run() {
         // two wide wires 4 dbu apart vertically; the parallel run (width 20) is short
-        let lib = lib_with(vec![rect_elem(19, 0, 0, 20, 10), rect_elem(19, 0, 14, 20, 24)]);
+        let lib = lib_with(vec![
+            rect_elem(19, 0, 0, 20, 10),
+            rect_elem(19, 0, 14, 20, 24),
+        ]);
         let v = check_library(&lib, None, &Rules::parse("runlen 19 6 30\n").unwrap()).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!((v[0].rule, v[0].value, v[0].limit), ("runlen", 20, 30));
         // run 20 ≥ min_run 15: clean
-        assert!(check_library(&lib, None, &Rules::parse("runlen 19 6 15\n").unwrap()).unwrap().is_empty());
+        assert!(
+            check_library(&lib, None, &Rules::parse("runlen 19 6 15\n").unwrap())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn fill_raises_coverage_keeping_clearance() {
         // a die boundary (layer 100, 1000×1000) sets the fill region; one sparse
         // layer-68 shape near the origin. fill layer 68 to 10%, 50-square, 50 gap.
-        let lib = lib_with(vec![rect_elem(100, 0, 0, 1000, 1000), rect_elem(68, 0, 0, 100, 100)]);
+        let lib = lib_with(vec![
+            rect_elem(100, 0, 0, 1000, 1000),
+            rect_elem(68, 0, 0, 100, 100),
+        ]);
         let rules = Rules::parse("fill 68 10 1000 50 50\n").unwrap();
         let (filled, n) = fill_library(&lib, None, &rules).unwrap();
         assert!(n > 0, "should place fill shapes");
-        assert_eq!(filled.cells[0].elements.len(), lib.cells[0].elements.len() + n);
+        assert_eq!(
+            filled.cells[0].elements.len(),
+            lib.cells[0].elements.len() + n
+        );
 
         let die = Rect::new(0, 0, 1000, 1000);
         let cov = |l: &Library| -> i64 {
@@ -1504,7 +1929,13 @@ mod tests {
                 .unwrap()
                 .elements
                 .iter()
-                .filter_map(|e| if elem_rect(e).0 == Layer::new(68, 0) { elem_rect(e).1 } else { None })
+                .filter_map(|e| {
+                    if elem_rect(e).0 == Layer::new(68, 0) {
+                        elem_rect(e).1
+                    } else {
+                        None
+                    }
+                })
                 .map(|r| overlap_area(&r, &die))
                 .sum()
         };
@@ -1531,16 +1962,23 @@ mod tests {
         }
         let wire = lib_with(elems);
         assert!(
-            check_library(&wire, None, &Rules::parse("space 68 100\n").unwrap()).unwrap().is_empty(),
+            check_library(&wire, None, &Rules::parse("space 68 100\n").unwrap())
+                .unwrap()
+                .is_empty(),
             "same-wire geometry is not a spacing gap"
         );
         assert!(
-            check_library(&wire, None, &Rules::parse("width 68 100\n").unwrap()).unwrap().is_empty(),
+            check_library(&wire, None, &Rules::parse("width 68 100\n").unwrap())
+                .unwrap()
+                .is_empty(),
             "the merged wire is 200 wide, not many 50-wide slivers"
         );
 
         // two separate wires 60 apart (< 100) -> exactly one spacing violation
-        let two = lib_with(vec![rect_elem(68, 0, 0, 100, 200), rect_elem(68, 160, 0, 260, 200)]);
+        let two = lib_with(vec![
+            rect_elem(68, 0, 0, 100, 200),
+            rect_elem(68, 160, 0, 260, 200),
+        ]);
         let v = check_library(&two, None, &Rules::parse("space 68 100\n").unwrap()).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!((v[0].rule, v[0].value, v[0].limit), ("space", 60, 100));
