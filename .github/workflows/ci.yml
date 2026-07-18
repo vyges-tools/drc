@@ -1,7 +1,10 @@
-# Manual-trigger build & test. Promote to push/PR triggers at public launch.
+# Build & test on every push to main and on pull requests (plus manual dispatch).
 name: ci
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
