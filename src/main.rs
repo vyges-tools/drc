@@ -69,7 +69,8 @@ const DESCRIBE: &str = r#"{
   "assertion": {
     "id": "drc-clean",
     "field": "clean",
-    "pass_when": { "is_true": true }
+    "pass_when": { "is_true": true },
+    "summary_field": "verdict_summary"
   }
 }
 "#;
@@ -122,11 +123,20 @@ fn render_clusters(viols: &[Violation]) -> String {
     s
 }
 
-fn render_text(viols: &[Violation], db_unit: f64) -> String {
+fn render_text(viols: &[Violation], db_unit: f64, unchecked: usize) -> String {
     let um = |dbu: i64| dbu as f64 * db_unit * 1e6; // DB units -> µm
     let mut s = String::new();
     if viols.is_empty() {
-        s.push_str("vyges-drc — CLEAN ✓  (no violations)\n");
+        // "CLEAN" over unexamined layers is the wrong word. Nothing was found, but not
+        // everything was looked at, and the headline is what gets quoted.
+        if unchecked > 0 {
+            s.push_str(&format!(
+                "vyges-drc — INCONCLUSIVE ?  (no violations on the checked layers; \
+                 {unchecked} layer(s) unexamined)\n"
+            ));
+        } else {
+            s.push_str("vyges-drc — CLEAN ✓  (no violations)\n");
+        }
         return s;
     }
     s.push_str(&format!("vyges-drc — {} violation(s) ✗\n", viols.len()));
@@ -205,9 +215,47 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
     s
 }
 
-fn render_json(viols: &[Violation]) -> String {
+/// The machine payload.
+///
+/// `clean` is the assertion field, and it is emitted **only when this run can conclude**.
+/// The three cases, and why they differ:
+///
+/// | violations | coverage | `clean` | verdict |
+/// |---|---|---|---|
+/// | some | any | `false` | fail — a defect on a checked layer is conclusive whatever else went unchecked |
+/// | none | complete | `true` | pass |
+/// | none | partial | *omitted* | unknown — nothing was found, but not everything was looked at |
+///
+/// Omitting the field is not a trick: the envelope reads an unreadable verdict field as
+/// "evidence indeterminate", which is exactly what a clean result over unexamined layers is.
+/// Reporting `clean: true` there would be the tool asserting something it did not establish.
+/// `verdict_summary` always says which case this is, so the status is never bare.
+fn render_json(viols: &[Violation], unchecked: usize) -> String {
+    let partial = unchecked > 0;
     let mut s = String::from("{\n");
-    s.push_str(&format!("  \"clean\": {},\n", viols.is_empty()));
+    // A defect found on a layer that WAS checked stands on its own; incomplete coverage can
+    // only ever downgrade a pass, never upgrade or excuse a failure.
+    let (clean, verdict) = if !viols.is_empty() {
+        (Some(false), format!("{} violation(s) found", viols.len()))
+    } else if partial {
+        (
+            None,
+            format!(
+                "no violations on the checked layers, but {unchecked} layer(s) carry geometry \
+                 no rule examines — this run did not establish that the layout is clean"
+            ),
+        )
+    } else {
+        (
+            Some(true),
+            "no violations; every layer with geometry was examined".to_string(),
+        )
+    };
+    if let Some(c) = clean {
+        s.push_str(&format!("  \"clean\": {c},\n"));
+    }
+    s.push_str(&format!("  \"verdict_summary\": \"{verdict}\",\n"));
+    s.push_str(&format!("  \"unchecked_layers\": {unchecked},\n"));
     s.push_str(&format!("  \"violations\": {},\n", viols.len()));
     let clusters = cluster::cluster(viols);
     s.push_str("  \"clusters\": [\n");
@@ -542,10 +590,10 @@ fn main() {
     };
 
     let text = if json {
-        let j = with_view_paths(&render_json(&viols), &views, &provenance);
+        let j = with_view_paths(&render_json(&viols, unchecked.len()), &views, &provenance);
         with_report_path(&j, opt(&args, "-o").as_deref())
     } else {
-        let mut t = render_text(&viols, lib.db_unit);
+        let mut t = render_text(&viols, lib.db_unit, unchecked.len());
         t.push_str(&format!("\n  {provenance}\n"));
         t
     };
@@ -566,5 +614,73 @@ fn main() {
     }
     if fail_on && !viols.is_empty() {
         exit(3);
+    }
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+    use vyges_drc::layout::geom::Rect;
+
+    fn viol() -> Violation {
+        Violation {
+            rule: "width",
+            layer: 66,
+            limit: 100,
+            value: 50,
+            a: Rect::new(0, 0, 50, 50),
+            b: None,
+        }
+    }
+
+    /// A defect on a layer that WAS checked is conclusive however much went unchecked.
+    /// Incomplete coverage may only ever downgrade a pass — never excuse a failure.
+    #[test]
+    fn violations_are_a_conclusive_failure_even_on_a_partial_run() {
+        for unchecked in [0, 5] {
+            let j = render_json(&[viol()], unchecked);
+            assert!(
+                j.contains("\"clean\": false"),
+                "unchecked={unchecked} must still report a definite failure: {j}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fully_covered_clean_run_asserts_pass() {
+        let j = render_json(&[], 0);
+        assert!(j.contains("\"clean\": true"), "{j}");
+        assert!(j.contains("every layer with geometry was examined"), "{j}");
+    }
+
+    /// The row that used to be wrong. Nothing was found, but not everything was looked at,
+    /// so the engine must NOT assert its verdict field — the envelope reads its absence as
+    /// "evidence indeterminate", which is exactly what this is.
+    #[test]
+    fn a_clean_but_partial_run_asserts_nothing() {
+        let j = render_json(&[], 2);
+        assert!(
+            !j.contains("\"clean\""),
+            "a partial clean run must not claim a verdict: {j}"
+        );
+        assert!(
+            j.contains("did not establish that the layout is clean"),
+            "and must say why, so the status is never bare: {j}"
+        );
+        assert!(j.contains("\"unchecked_layers\": 2"), "{j}");
+    }
+
+    /// The headline is what gets quoted, so it must not say CLEAN over unexamined layers.
+    #[test]
+    fn the_text_headline_does_not_claim_clean_on_a_partial_run() {
+        let full = render_text(&[], 1e-9, 0);
+        assert!(full.contains("CLEAN"), "{full}");
+        let partial = render_text(&[], 1e-9, 3);
+        assert!(
+            !partial.contains("CLEAN"),
+            "must not read as a pass: {partial}"
+        );
+        assert!(partial.contains("INCONCLUSIVE"), "{partial}");
+        assert!(partial.contains("3 layer(s) unexamined"), "{partial}");
     }
 }
