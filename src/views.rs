@@ -90,6 +90,18 @@ pub const MAX_DIM: u32 = 900;
 /// surroundings — which is the entire reason for rendering.
 pub const MIN_CONTEXT: i32 = 200;
 
+// NOT CARRIED: the verdict a view is evidence for.
+//
+// A rendered view looks exactly as confident whether `engineering.status` came out `pass` or
+// `unknown`. Since #72 an engine can report incomplete coverage and have a held assertion
+// downgraded, so the state now exists to inherit -- a view attached to an `unknown` verdict
+// should not read as proof of anything.
+//
+// Deliberately not guessed at: how to show it (a caption? a border? a sibling JSON field?)
+// depends on how these get consumed, and nothing consumes them yet. Revisit when a caller
+// renders these into a report or an agent starts reasoning from them, and let that consumer
+// say what it needs. See vyges-tools-internal#72.
+
 /// One rendered view and what it depicts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct View {
