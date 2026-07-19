@@ -8,6 +8,7 @@
 
 use std::process::exit;
 
+use vyges_drc::cluster;
 use vyges_drc::drc::{self, Violation};
 use vyges_drc::layout::gds::Library;
 use vyges_drc::rules::Rules;
@@ -67,6 +68,54 @@ const DESCRIBE: &str = r#"{
 }
 "#;
 
+/// The grouped view, ahead of the flat list.
+///
+/// A flat list of thousands of violations hides its own shape: the first screenful is one
+/// defect repeated, and the single catastrophic one is somewhere past the truncation. Both
+/// orderings are printed because neither answers the other's question — count says what to
+/// fix to clear the report, severity says what is most broken.
+fn render_clusters(viols: &[Violation]) -> String {
+    let by_count = cluster::cluster(viols);
+    if by_count.len() < 2 {
+        return String::new(); // one group is not a summary, it is the list again
+    }
+    let row = |c: &cluster::Cluster| {
+        let spread = if c.distinct_values == 1 {
+            " (one repeated value)".to_string()
+        } else {
+            format!(" ({} distinct values)", c.distinct_values)
+        };
+        format!(
+            "    {:<9} layer {:<4} {:>6} ×   worst {} vs {}  (misses by {:.0}%){}\n",
+            c.rule,
+            c.layer,
+            c.count,
+            c.value,
+            c.limit,
+            c.severity * 100.0,
+            spread
+        )
+    };
+    let mut s = String::from("\n  most occurrences:\n");
+    for c in by_count.iter().take(8) {
+        s.push_str(&row(c));
+    }
+    // Only worth printing when it actually differs; an identical list twice is noise.
+    let by_sev = cluster::by_severity(&by_count);
+    let same = by_sev
+        .iter()
+        .zip(by_count.iter())
+        .all(|(a, b)| a.rule == b.rule && a.layer == b.layer);
+    if !same {
+        s.push_str("\n  worst misses:\n");
+        for c in by_sev.iter().take(8) {
+            s.push_str(&row(c));
+        }
+    }
+    s.push('\n');
+    s
+}
+
 fn render_text(viols: &[Violation], db_unit: f64) -> String {
     let um = |dbu: i64| dbu as f64 * db_unit * 1e6; // DB units -> µm
     let mut s = String::new();
@@ -75,6 +124,7 @@ fn render_text(viols: &[Violation], db_unit: f64) -> String {
         return s;
     }
     s.push_str(&format!("vyges-drc — {} violation(s) ✗\n", viols.len()));
+    s.push_str(&render_clusters(viols));
     for v in viols.iter().take(200) {
         let at = format!("({},{})-({},{})", v.a.x0, v.a.y0, v.a.x1, v.a.y1);
         // the measured-vs-bound clause, in the rule's own unit
@@ -153,6 +203,33 @@ fn render_json(viols: &[Violation]) -> String {
     let mut s = String::from("{\n");
     s.push_str(&format!("  \"clean\": {},\n", viols.is_empty()));
     s.push_str(&format!("  \"violations\": {},\n", viols.len()));
+    let clusters = cluster::cluster(viols);
+    s.push_str("  \"clusters\": [\n");
+    for (i, c) in clusters.iter().enumerate() {
+        let comma = if i + 1 < clusters.len() { "," } else { "" };
+        s.push_str(&format!(
+            "    {{\"rule\": \"{}\", \"layer\": {}, \"count\": {}, \"distinct_values\": {}, \
+             \"value\": {}, \"limit\": {}, \"severity\": {:.6}, \
+             \"worst\": [{}, {}, {}, {}], \"extent\": [{}, {}, {}, {}]}}{}\n",
+            c.rule,
+            c.layer,
+            c.count,
+            c.distinct_values,
+            c.value,
+            c.limit,
+            c.severity,
+            c.worst.x0,
+            c.worst.y0,
+            c.worst.x1,
+            c.worst.y1,
+            c.extent.x0,
+            c.extent.y0,
+            c.extent.x1,
+            c.extent.y1,
+            comma
+        ));
+    }
+    s.push_str("  ],\n");
     s.push_str("  \"items\": [\n");
     for (i, v) in viols.iter().enumerate() {
         let comma = if i + 1 < viols.len() { "," } else { "" };
