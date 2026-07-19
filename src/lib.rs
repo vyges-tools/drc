@@ -23,6 +23,7 @@ pub use vyges_layout as layout;
 pub mod cluster;
 pub mod drc;
 pub mod rules;
+pub mod views;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const COPYRIGHT: &str = "© 2026 Vyges. All Rights Reserved.  https://vyges.com";

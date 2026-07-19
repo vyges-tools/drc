@@ -588,6 +588,19 @@ pub fn check_library(
     top: Option<&str>,
     rules: &Rules,
 ) -> Result<Vec<Violation>, String> {
+    check_library_parts(lib, top, rules).map(|(v, _)| v)
+}
+
+/// As [`check_library`], but also hands back the flattened cell.
+///
+/// Rendering violation views needs the same geometry the checks ran on. Flattening it a
+/// second time would both cost real time on a full block and risk the views describing
+/// slightly different geometry than the findings if the two paths ever diverged.
+pub fn check_library_parts(
+    lib: &Library,
+    top: Option<&str>,
+    rules: &Rules,
+) -> Result<(Vec<Violation>, crate::layout::gds::Cell), String> {
     let top = pick_top(lib, top)?;
     let cell = flatten::flatten(lib, &top)?;
 
@@ -729,7 +742,7 @@ pub fn check_library(
             track_violations(rule, shapes, &mut viols);
         }
     }
-    Ok(viols)
+    Ok((viols, cell))
 }
 
 /// Windowed metal-density check: tile the layer's bounding box into `window`-square

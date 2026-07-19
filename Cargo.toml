@@ -15,6 +15,9 @@ vyges-layout = { git = "https://github.com/vyges-tools/layout", branch = "main" 
 # Structured events (vyges-events/1.0) for the MCP causal trail. Core-only (no tracing
 # subscriber pulled into the engine) — vyges-drc emits Event directly.
 vyges-events = { git = "https://github.com/vyges-tools/events", branch = "main", default-features = false }
+# Rendering ranked violation views. Shares the vyges-layout GDS kernel this crate already
+# uses, so this adds a renderer rather than a second geometry stack.
+vyges-gds-view = { git = "https://github.com/vyges-tools/gds-view", branch = "main" }
 
 [[bin]]
 name = "vyges-drc"

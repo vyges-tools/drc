@@ -112,6 +112,7 @@ name = "vyges-drc"
 version = "0.1.15"
 dependencies = [
  "vyges-events",
+ "vyges-gds-view",
  "vyges-layout",
 ]
 
@@ -122,6 +123,15 @@ source = "git+https://github.com/vyges-tools/events?branch=main#7ba025d72a54605d
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "vyges-gds-view"
+version = "0.1.15"
+source = "git+https://github.com/vyges-tools/gds-view?branch=main#8c8b3be5d4db490f2b87ffab312df828fa3811a3"
+dependencies = [
+ "vyges-events",
+ "vyges-layout",
 ]
 
 [[package]]

@@ -12,6 +12,7 @@ use vyges_drc::cluster;
 use vyges_drc::drc::{self, Violation};
 use vyges_drc::layout::gds::Library;
 use vyges_drc::rules::Rules;
+use vyges_drc::views;
 
 const USAGE: &str = "\
 vyges-drc — geometric design-rule check (GDS/OASIS + rule deck -> violations)
@@ -30,6 +31,8 @@ flags:
   -o FILE               write the report (or, for `fill`, the filled GDS) to FILE
   --json                machine-readable JSON instead of text
   --fail-on-violation   exit 3 when any violation is found (CI gate)
+  --views DIR    render ranked violation views (PNG) into DIR — diagnostic evidence,
+                 not sign-off; capped, and the number dropped is reported
   --describe            print a machine-readable JSON description of the command
   -h, --help · -V, --version
 ";
@@ -59,7 +62,10 @@ const DESCRIBE: &str = r#"{
       "out":  { "type": "string", "description": "write the report to FILE instead of stdout" }
     }
   },
-  "artifacts": [ { "role": "drc_report", "field": "report_path" } ],
+  "artifacts": [
+    { "role": "drc_report", "field": "report_path" },
+    { "role": "drc_view",   "field": "view_paths" }
+  ],
   "assertion": {
     "id": "drc-clean",
     "field": "clean",
@@ -314,6 +320,37 @@ fn emit_events(viols: &[Violation]) {
 /// String surgery rather than a JSON round-trip because this crate is std-only. Inserting
 /// after the opening brace keeps every existing field untouched; an empty object gets no
 /// trailing comma.
+/// Splice the rendered view paths into the JSON payload as `view_paths`.
+///
+/// An array, in ranking order: the descriptor declares one `drc_view` artifact whose field
+/// yields many paths, so the envelope hashes each of them centrally rather than this engine
+/// hashing its own output and reporting it pre-digested.
+fn with_view_paths(json: &str, views: &[views::View]) -> String {
+    if views.is_empty() {
+        return json.to_string();
+    }
+    let Some(rest) = json.trim_start().strip_prefix('{') else {
+        return json.to_string();
+    };
+    let list = views
+        .iter()
+        .map(|v| {
+            let esc = v.path.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{esc}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sep = if rest.trim_start().starts_with('}') {
+        ""
+    } else {
+        ","
+    };
+    format!(
+        "{{\"view_paths\": [{list}], \"views_disclaimer\": \"{}\"{sep}{rest}",
+        views::DISCLAIMER
+    )
+}
+
 fn with_report_path(json: &str, path: Option<&str>) -> String {
     let (Some(p), Some(rest)) = (path, json.trim_start().strip_prefix('{')) else {
         return json.to_string();
@@ -445,13 +482,50 @@ fn main() {
         }
     };
 
-    let viols = drc::check_library(&lib, top.as_deref(), &rules).unwrap_or_else(|e| {
-        eprintln!("error: {e}");
-        exit(1);
-    });
+    let (viols, cell) =
+        drc::check_library_parts(&lib, top.as_deref(), &rules).unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            exit(1);
+        });
     emit_events(&viols); // vyges-events causal trail on stderr; the report goes to stdout / -o
+
+    // Ranked visual evidence, when asked for. Rendered from the same flattened cell the
+    // checks ran on, so a view cannot depict different geometry than the finding it
+    // illustrates. Opt-in: it writes files, and a check that silently littered a directory
+    // would be a surprise.
+    let views = match opt(&args, "--views") {
+        Some(dir) if !viols.is_empty() => {
+            let clusters = cluster::cluster(&viols);
+            match views::render(&cell, &clusters, std::path::Path::new(&dir)) {
+                Ok((vs, dropped)) => {
+                    eprintln!(
+                        "wrote {} view(s) to {dir} — {}",
+                        vs.len(),
+                        views::DISCLAIMER
+                    );
+                    if dropped > 0 {
+                        // Never let a capped set read as the complete one.
+                        eprintln!(
+                            "note: {dropped} further cluster(s) not rendered (cap is {} views)",
+                            views::MAX_VIEWS
+                        );
+                    }
+                    vs
+                }
+                Err(e) => {
+                    // Failing to draw a picture must not fail the check: the verdict stands
+                    // on the geometry, not on the illustration.
+                    eprintln!("warning: could not render views: {e}");
+                    Vec::new()
+                }
+            }
+        }
+        _ => Vec::new(),
+    };
+
     let text = if json {
-        with_report_path(&render_json(&viols), opt(&args, "-o").as_deref())
+        let j = with_view_paths(&render_json(&viols), &views);
+        with_report_path(&j, opt(&args, "-o").as_deref())
     } else {
         render_text(&viols, lib.db_unit)
     };
