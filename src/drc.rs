@@ -582,6 +582,45 @@ fn c2c_violations(
     }
 }
 
+/// Layers carrying geometry that no rule in `rules` mentions, sorted.
+///
+/// This is the difference between "clean" and "not examined", and it is the single most
+/// misleading thing a DRC report can omit. A deck with rules for met1..met3 run over a layout
+/// that also has met4 and met5 reports zero violations on those layers — not because they are
+/// correct, but because nothing looked. A reader sees "CLEAN" and reasonably concludes the
+/// layout passes.
+///
+/// Reported rather than fixed: which layers a deck ought to cover is a question about the
+/// deck and the process, not something this engine can decide.
+pub fn unchecked_layers(cell: &crate::layout::gds::Cell, rules: &Rules) -> Vec<Layer> {
+    use crate::layout::gds::Element;
+    let mut seen: std::collections::BTreeSet<Layer> = Default::default();
+    for e in &cell.elements {
+        // Read the layer off the element directly rather than through `elem_rect`, which
+        // returns a sentinel Layer(0,0) for anything it cannot turn into a rectangle. That
+        // sentinel is not a layer: reporting it would flag a phantom "0/0" on every layout
+        // with a label in it, and a warning that cries wolf is one people learn to ignore.
+        // It would also mis-attribute a Path -- real drawn geometry -- to 0/0 instead of the
+        // layer it is actually on, which is the direction that matters.
+        let layer = match e {
+            Element::Boundary {
+                layer, datatype, ..
+            } => Layer::new(*layer, *datatype),
+            Element::Box { layer, boxtype, .. } => Layer::new(*layer, *boxtype),
+            Element::Path {
+                layer, datatype, ..
+            } => Layer::new(*layer, *datatype),
+            // Text is an annotation and Sref/Aref are already resolved by flattening, so
+            // neither is unchecked geometry.
+            Element::Text { .. } | Element::Sref { .. } | Element::Aref { .. } => continue,
+        };
+        if !rules.covers(layer) {
+            seen.insert(layer);
+        }
+    }
+    seen.into_iter().collect()
+}
+
 /// Run the rule deck over the flattened top cell of `lib`.
 pub fn check_library(
     lib: &Library,

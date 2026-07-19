@@ -24,11 +24,57 @@ use crate::cluster::Cluster;
 use crate::layout::gds::Cell;
 use crate::layout::geom::Rect;
 
-/// What every emitted view means, and does not.
+/// What every emitted view means, and does not — the fixed part.
+///
+/// See [`provenance`] for the run-specific version, which names the deck that produced the
+/// findings and the layers it did not examine. A constant alone cannot say the second thing,
+/// and the second thing is the one that changes what the reader should conclude.
 pub const DISCLAIMER: &str = "Representative diagnostic evidence from the Vyges geometric \
     rule deck. Each view shows the worst occurrence of one rule/layer cluster, not every \
     occurrence. NOT foundry sign-off, and not a substitute for the native report or the \
     foundry rule deck.";
+
+/// The disclaimer for one specific run: what deck produced these findings, and what it did
+/// not look at.
+///
+/// A deck's identity matters because "checked" is meaningless without "checked against
+/// what". `unchecked` matters more: geometry on a layer no rule mentions was not found
+/// clean, it was not examined, and a reader who is not told that will assume otherwise. The
+/// warning is deliberately blunt, and deliberately placed in the same string as the verdict
+/// so it cannot be separated from it in a quote or a screenshot.
+pub fn provenance(rules: &crate::rules::Rules, unchecked: &[crate::rules::Layer]) -> String {
+    let (families, total) = rules.summary();
+    // Deliberately does NOT include DISCLAIMER. That sentence describes the rendered views,
+    // and this string is emitted whether or not any were rendered -- leading a view-less run
+    // with "each view shows..." describes pictures that do not exist. The caller joins the
+    // two when there are views to disclaim.
+    let mut s = format!(
+        "Deck: vyges-drc {} — {total} rule(s) across {} family(ies) [{}].",
+        crate::VERSION,
+        families.len(),
+        families.join(", ")
+    );
+    if !unchecked.is_empty() {
+        let names: Vec<String> = unchecked
+            .iter()
+            .take(12)
+            .map(|l| format!("{}/{}", l.num, l.dt))
+            .collect();
+        let more = unchecked.len().saturating_sub(names.len());
+        s.push_str(&format!(
+            " PARTIAL COVERAGE: {} layer(s) carry geometry that NO rule in this deck examines \
+             [{}{}] — those layers were not found clean, they were not checked.",
+            unchecked.len(),
+            names.join(", "),
+            if more > 0 {
+                format!(", +{more} more")
+            } else {
+                String::new()
+            }
+        ));
+    }
+    s
+}
 
 /// At most this many cluster views. Past a dozen the set stops being a summary and becomes a
 /// pile nobody opens; the ranking is there so the ones that are dropped are the ones that
@@ -296,6 +342,151 @@ mod tests {
         assert!(
             DISCLAIMER.contains("not every"),
             "it must scope what is shown"
+        );
+    }
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+    use crate::layout::gds::{Cell, Element};
+    use crate::rules::{Layer, Rules};
+
+    fn deck(text: &str) -> Rules {
+        Rules::parse(text).expect("deck parses")
+    }
+
+    #[test]
+    fn provenance_names_the_deck_that_produced_the_findings() {
+        let r = deck("width 66 100\nspace 68 100\n");
+        let p = provenance(&r, &[]);
+        assert!(
+            p.contains(crate::VERSION),
+            "must name the engine version: {p}"
+        );
+        assert!(p.contains("2 rule(s)"), "must count the rules: {p}");
+        assert!(
+            p.contains("width") && p.contains("space"),
+            "must name the families: {p}"
+        );
+    }
+
+    /// The clause that changes what a reader should conclude. Without it, "CLEAN" on a layout
+    /// whose layers the deck never mentions reads as a pass.
+    #[test]
+    fn partial_coverage_is_stated_loudly_when_layers_went_unexamined() {
+        let r = deck("width 66 100\n");
+        let p = provenance(&r, &[Layer::new(68, 0), Layer::new(70, 0)]);
+        assert!(p.contains("PARTIAL COVERAGE"), "{p}");
+        // it describes the CHECK, so it must not claim things about views that may not exist
+        assert!(
+            !p.contains("Each view shows"),
+            "provenance must not describe views: {p}"
+        );
+        assert!(
+            p.contains("68/0") && p.contains("70/0"),
+            "must name the layers: {p}"
+        );
+        assert!(
+            p.contains("not found clean, they were not checked"),
+            "must say what the silence means: {p}"
+        );
+    }
+
+    /// ...and is absent when the deck really did cover everything, so the warning keeps its
+    /// force. A disclaimer printed unconditionally is one nobody reads.
+    #[test]
+    fn full_coverage_carries_no_partial_warning() {
+        let p = provenance(&deck("width 66 100\n"), &[]);
+        assert!(!p.contains("PARTIAL"), "{p}");
+    }
+
+    #[test]
+    fn a_long_unchecked_list_is_capped_and_says_how_many_more() {
+        let r = deck("width 66 100\n");
+        let many: Vec<Layer> = (0..30).map(|i| Layer::new(100 + i, 0)).collect();
+        let p = provenance(&r, &many);
+        assert!(p.contains("30 layer(s)"), "the total must be exact: {p}");
+        assert!(p.contains("more"), "the elision must be visible: {p}");
+    }
+
+    /// `elem_rect` returns a sentinel Layer(0,0) for anything it cannot rectangle-ise, so
+    /// reading layers through it would report a phantom 0/0 on any layout containing a label
+    /// — and would mis-attribute a Path, which is real drawn geometry, to that sentinel
+    /// instead of its own layer. Both directions are checked here.
+    #[test]
+    fn coverage_reads_real_layers_and_ignores_annotations() {
+        let cell = Cell {
+            elements: vec![
+                Element::Boundary {
+                    layer: 66,
+                    datatype: 0,
+                    pts: crate::layout::geom::Rect::new(0, 0, 10, 10).as_boundary(),
+                },
+                // a Path on an uncovered layer: must be reported as 68/0, not as 0/0
+                Element::Path {
+                    layer: 68,
+                    datatype: 0,
+                    width: 4,
+                    pts: vec![(0, 0), (100, 0)],
+                },
+                // an annotation: not geometry, must not appear at all
+                Element::Text {
+                    layer: 99,
+                    texttype: 0,
+                    x: 0,
+                    y: 0,
+                    string: "label".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let un = crate::drc::unchecked_layers(&cell, &deck("width 66 100\n"));
+        assert_eq!(un, vec![Layer::new(68, 0)], "got {un:?}");
+    }
+
+    #[test]
+    fn a_deck_covering_everything_reports_nothing_unchecked() {
+        let cell = Cell {
+            elements: vec![Element::Boundary {
+                layer: 66,
+                datatype: 0,
+                pts: crate::layout::geom::Rect::new(0, 0, 10, 10).as_boundary(),
+            }],
+            ..Default::default()
+        };
+        assert!(crate::drc::unchecked_layers(&cell, &deck("width 66 100\n")).is_empty());
+    }
+
+    /// `covers` has to consult every rule family, or a layer checked only by (say) an
+    /// enclosure rule would be reported as unexamined and the warning would be wrong.
+    #[test]
+    fn coverage_counts_every_rule_family_not_just_width_and_space() {
+        let cell = Cell {
+            elements: vec![Element::Boundary {
+                layer: 77,
+                datatype: 0,
+                pts: crate::layout::geom::Rect::new(0, 0, 10, 10).as_boundary(),
+            }],
+            ..Default::default()
+        };
+        // layer 77 appears only as the inner of an enclosure rule
+        let r = deck("enclosure 76 77 40\n");
+        assert!(
+            crate::drc::unchecked_layers(&cell, &r).is_empty(),
+            "a layer named by an enclosure rule IS examined"
+        );
+    }
+
+    /// The fill family is consumed by the fill generator, not the checker, so counting it
+    /// would overstate how much checking happened.
+    #[test]
+    fn the_rule_count_excludes_families_the_checker_does_not_run() {
+        let (_, with_fill) = deck("width 66 100\nfill 70 40 1000 100 50\n").summary();
+        let (_, without) = deck("width 66 100\n").summary();
+        assert_eq!(
+            with_fill, without,
+            "fill must not inflate the checked-rule count"
         );
     }
 }

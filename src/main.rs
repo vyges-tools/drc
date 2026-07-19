@@ -325,10 +325,7 @@ fn emit_events(viols: &[Violation]) {
 /// An array, in ranking order: the descriptor declares one `drc_view` artifact whose field
 /// yields many paths, so the envelope hashes each of them centrally rather than this engine
 /// hashing its own output and reporting it pre-digested.
-fn with_view_paths(json: &str, views: &[views::View]) -> String {
-    if views.is_empty() {
-        return json.to_string();
-    }
+fn with_view_paths(json: &str, views: &[views::View], provenance: &str) -> String {
     let Some(rest) = json.trim_start().strip_prefix('{') else {
         return json.to_string();
     };
@@ -345,9 +342,18 @@ fn with_view_paths(json: &str, views: &[views::View]) -> String {
     } else {
         ","
     };
+    let esc_prov = provenance.replace('\\', "\\\\").replace('"', "\\\"");
+    // The provenance rides even when nothing was rendered: it describes the CHECK — which
+    // deck, how many rules, and which layers went unexamined — not the pictures. A machine
+    // consumer reading only this JSON needs it either way, and it is the PARTIAL COVERAGE
+    // clause that decides whether "clean" means anything.
+    if views.is_empty() {
+        return format!("{{\"provenance\": \"{esc_prov}\"{sep}{rest}");
+    }
+    let esc_disc = views::DISCLAIMER.replace('"', "\\\"");
     format!(
-        "{{\"view_paths\": [{list}], \"views_disclaimer\": \"{}\"{sep}{rest}",
-        views::DISCLAIMER
+        "{{\"view_paths\": [{list}], \"views_disclaimer\": \"{esc_disc}\", \
+         \"provenance\": \"{esc_prov}\"{sep}{rest}"
     )
 }
 
@@ -489,6 +495,18 @@ fn main() {
         });
     emit_events(&viols); // vyges-events causal trail on stderr; the report goes to stdout / -o
 
+    // What the deck did NOT look at. A clean result on an unexamined layer is not evidence of
+    // correctness, and a reader not told so will assume otherwise — so this rides with the
+    // verdict everywhere the verdict goes, not in a footnote.
+    let unchecked = drc::unchecked_layers(&cell, &rules);
+    let provenance = views::provenance(&rules, &unchecked);
+    if !unchecked.is_empty() {
+        eprintln!(
+            "warning: {} layer(s) carry geometry no rule examines — this run is PARTIAL",
+            unchecked.len()
+        );
+    }
+
     // Ranked visual evidence, when asked for. Rendered from the same flattened cell the
     // checks ran on, so a view cannot depict different geometry than the finding it
     // illustrates. Opt-in: it writes files, and a check that silently littered a directory
@@ -499,7 +517,7 @@ fn main() {
             match views::render(&cell, &clusters, std::path::Path::new(&dir)) {
                 Ok((vs, dropped)) => {
                     eprintln!(
-                        "wrote {} view(s) to {dir} — {}",
+                        "wrote {} view(s) to {dir} — {} {provenance}",
                         vs.len(),
                         views::DISCLAIMER
                     );
@@ -524,10 +542,12 @@ fn main() {
     };
 
     let text = if json {
-        let j = with_view_paths(&render_json(&viols), &views);
+        let j = with_view_paths(&render_json(&viols), &views, &provenance);
         with_report_path(&j, opt(&args, "-o").as_deref())
     } else {
-        render_text(&viols, lib.db_unit)
+        let mut t = render_text(&viols, lib.db_unit);
+        t.push_str(&format!("\n  {provenance}\n"));
+        t
     };
     match opt(&args, "-o") {
         Some(path) => {

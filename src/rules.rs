@@ -239,6 +239,78 @@ impl std::fmt::Display for RulesError {
 impl std::error::Error for RulesError {}
 
 impl Rules {
+    /// Rule families that carry at least one rule, and how many rules there are in total.
+    ///
+    /// A view or a report that says "checked" without saying *how much was checked* invites
+    /// the reader to supply their own assumption, which is usually "a foundry deck". This is
+    /// the deck's own account of itself.
+    pub fn summary(&self) -> (Vec<&'static str>, usize) {
+        // (name, count) per family. Listed explicitly rather than derived, so adding a rule
+        // family to the struct without adding it here is a compile-time nudge, not a silent
+        // undercount.
+        let counts: [(&'static str, usize); 15] = [
+            ("width", self.width.len()),
+            ("space", self.space.len()),
+            ("area", self.area.len()),
+            ("density", self.density.len()),
+            ("connect", self.connect.len()),
+            ("antenna", self.antenna.len()),
+            ("enclosure", self.enclosure.len()),
+            ("span", self.span.len()),
+            ("venc", self.venc.len()),
+            ("grid", self.grid.len()),
+            ("track", self.track.len()),
+            ("corner", self.corner.len()),
+            ("sep", self.sep.len()),
+            ("c2c", self.c2c.len()),
+            ("runlen", self.runlen.len()),
+        ];
+        let families = counts
+            .iter()
+            .filter(|(_, n)| *n > 0)
+            .map(|(k, _)| *k)
+            .collect();
+        // `fill` is deliberately excluded: it is consumed by the fill generator, not the
+        // checker, so counting it would overstate what was checked.
+        let total = counts.iter().map(|(_, n)| n).sum();
+        (families, total)
+    }
+
+    /// Whether any rule in the deck mentions `layer`.
+    ///
+    /// The basis of the coverage report: geometry on a layer no rule names was not found
+    /// clean, it was not examined. Those are very different claims and only one of them is
+    /// true.
+    pub fn covers(&self, layer: Layer) -> bool {
+        self.width.contains_key(&layer)
+            || self.space.contains_key(&layer)
+            || self.area.contains_key(&layer)
+            || self.density.contains_key(&layer)
+            || self.connect.iter().any(|(a, b)| *a == layer || *b == layer)
+            || self
+                .antenna
+                .iter()
+                .any(|a| a.conductor == layer || a.gate == layer)
+            || self
+                .enclosure
+                .iter()
+                .any(|e| e.inner == layer || e.outer == layer)
+            || self.span.iter().any(|s| s.cut == layer || s.metal == layer)
+            || self
+                .venc
+                .iter()
+                .any(|v| v.inner == layer || v.outer == layer)
+            || self.grid.iter().any(|g| g.layer == layer)
+            || self.track.iter().any(|t| t.layer == layer)
+            || self
+                .corner
+                .iter()
+                .any(|c| c.inner == layer || c.outer == layer)
+            || self.sep.iter().any(|s| s.layer == layer)
+            || self.c2c.iter().any(|c| c.layer == layer)
+            || self.runlen.iter().any(|r| r.layer == layer)
+    }
+
     pub fn parse(text: &str) -> Result<Rules, RulesError> {
         let mut r = Rules::default();
         for (n, raw) in text.lines().enumerate() {
