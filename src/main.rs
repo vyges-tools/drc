@@ -235,25 +235,35 @@ fn render_json(viols: &[Violation], unchecked: usize) -> String {
     let mut s = String::from("{\n");
     // A defect found on a layer that WAS checked stands on its own; incomplete coverage can
     // only ever downgrade a pass, never upgrade or excuse a failure.
-    let (clean, verdict) = if !viols.is_empty() {
-        (Some(false), format!("{} violation(s) found", viols.len()))
+    let verdict = if !viols.is_empty() {
+        format!("{} violation(s) found", viols.len())
     } else if partial {
-        (
-            None,
-            format!(
-                "no violations on the checked layers, but {unchecked} layer(s) carry geometry \
-                 no rule examines — this run did not establish that the layout is clean"
-            ),
+        format!(
+            "no violations on the checked layers, but {unchecked} layer(s) carry geometry \
+             no rule examines — this run did not establish that the layout is clean"
         )
     } else {
-        (
-            Some(true),
-            "no violations; every layer with geometry was examined".to_string(),
-        )
+        "no violations; every layer with geometry was examined".to_string()
     };
-    if let Some(c) = clean {
-        s.push_str(&format!("  \"clean\": {c},\n"));
-    }
+    // `clean` states what the checks found, always. It is honest on its own terms: there
+    // were no violations *on what was checked*.
+    //
+    // Whether that amounts to a pass is a separate question, answered by `coverage`. The
+    // envelope downgrades a held assertion over incomplete coverage to `unknown` (#72), so
+    // this engine reports two facts and asserts neither over the other. An earlier version
+    // omitted `clean` on a partial run to force the same verdict; it worked, but threw away
+    // the "no violations were found" fact on the way, leaving a consumer unable to tell a
+    // partial-but-clean run from one that produced no verdict at all.
+    s.push_str(&format!("  \"clean\": {},\n", viols.is_empty()));
+    s.push_str(&format!(
+        "  \"coverage\": {{\"complete\": {}, \"note\": \"{}\"}},\n",
+        !partial,
+        if partial {
+            format!("{unchecked} layer(s) carry geometry that no rule in this deck examines")
+        } else {
+            "every layer with geometry was examined by at least one rule".to_string()
+        }
+    ));
     s.push_str(&format!("  \"verdict_summary\": \"{verdict}\",\n"));
     s.push_str(&format!("  \"unchecked_layers\": {unchecked},\n"));
     s.push_str(&format!("  \"violations\": {},\n", viols.len()));
@@ -653,21 +663,34 @@ mod verdict_tests {
         assert!(j.contains("every layer with geometry was examined"), "{j}");
     }
 
-    /// The row that used to be wrong. Nothing was found, but not everything was looked at,
-    /// so the engine must NOT assert its verdict field — the envelope reads its absence as
-    /// "evidence indeterminate", which is exactly what this is.
+    /// A partial run reports BOTH facts and asserts neither over the other: no violations were
+    /// found, and not everything was looked at. The envelope turns that pair into `unknown`
+    /// (#72). An earlier version omitted `clean` to force the same verdict; it worked, but
+    /// discarded the "nothing was found" half, which is real information.
     #[test]
-    fn a_clean_but_partial_run_asserts_nothing() {
+    fn a_clean_but_partial_run_reports_both_facts() {
         let j = render_json(&[], 2);
         assert!(
-            !j.contains("\"clean\""),
-            "a partial clean run must not claim a verdict: {j}"
+            j.contains("\"clean\": true"),
+            "what the checks found must still be stated: {j}"
+        );
+        assert!(
+            j.contains("\"complete\": false"),
+            "and so must the fact that they did not cover everything: {j}"
         );
         assert!(
             j.contains("did not establish that the layout is clean"),
-            "and must say why, so the status is never bare: {j}"
+            "the summary must say why the pair is not a pass: {j}"
         );
         assert!(j.contains("\"unchecked_layers\": 2"), "{j}");
+    }
+
+    /// Full coverage must say so explicitly rather than by omission, so a consumer never has
+    /// to infer completeness from a missing key.
+    #[test]
+    fn a_fully_covered_run_states_its_coverage_is_complete() {
+        let j = render_json(&[], 0);
+        assert!(j.contains("\"complete\": true"), "{j}");
     }
 
     /// The headline is what gets quoted, so it must not say CLEAN over unexamined layers.
