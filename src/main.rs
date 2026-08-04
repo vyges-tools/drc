@@ -40,6 +40,7 @@ flags:
 /// Machine-readable description of `vyges-drc check` for tooling that drives the
 /// command programmatically (parameters, how to build the invocation, output).
 const DESCRIBE: &str = r#"{
+  "schema": "vyges-tool-descriptor/1.1",
   "name": "drc",
   "summary": "geometric design-rule check (GDS/OASIS layout + rule deck)",
   "maturity": "structured",
