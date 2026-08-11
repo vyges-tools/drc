@@ -15,12 +15,12 @@ use vyges_drc::rules::Rules;
 use vyges_drc::views;
 
 const USAGE: &str = "\
-vyges-drc — geometric design-rule check (GDS/OASIS + rule deck -> violations)
+vyges loom drc — geometric design-rule check (GDS/OASIS + rule deck -> violations)
 
 usage:
-  vyges-drc check GDS --rules DECK [--top CELL] [-o OUT] [--json] [--fail-on-violation]
-  vyges-drc fill  GDS --rules DECK [--top CELL] -o OUT.gds     # metal-fill generator
-  vyges-drc demo  [--json]
+  vyges loom drc check GDS --rules DECK [--top CELL] [-o OUT] [--json] [--fail-on-violation]
+  vyges loom drc fill  GDS --rules DECK [--top CELL] -o OUT.gds     # metal-fill generator
+  vyges loom drc demo  [--json]
 
 The input layout may be GDSII (.gds) or OASIS (.oas/.oasis) — picked by extension.
 
