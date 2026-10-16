@@ -14,6 +14,27 @@ use vyges_drc::layout::gds::Library;
 use vyges_drc::rules::Rules;
 use vyges_drc::views;
 
+/// A diagnostic as a structured event (`DRC-ERROR`, or `DRC-WARNING` for a warning; `vyges-events/1.0`)
+/// instead of a bare stderr line; text after a blank line (the usage) stays plain help.
+fn diag_line(msg: String) {
+    let (head, help) = match msg.split_once("\n\n") {
+        Some((h, rest)) => (h.to_string(), Some(rest.to_string())),
+        None => (msg, None),
+    };
+    let warn = head.starts_with("warning: ");
+    let text = head.strip_prefix("error: ").or_else(|| head.strip_prefix("warning: ")).unwrap_or(&head).to_string();
+    let (severity, code) = if warn { (vyges_events::Severity::Warn, "DRC-WARNING") } else { (vyges_events::Severity::Error, "DRC-ERROR") };
+    vyges_events::emit(&vyges_events::Event::new("vyges-drc", severity, text).with_code(code));
+    if let Some(h) = help {
+        eprintln!("{h}");
+    }
+}
+
+macro_rules! diag {
+    ($($t:tt)*) => { diag_line(format!($($t)*)) };
+}
+
+
 const USAGE: &str = "\
 vyges loom drc — geometric design-rule check (GDS/OASIS + rule deck -> violations)
 
@@ -333,7 +354,7 @@ fn deck_arg(args: &[String]) -> Option<String> {
         match pdk_resolve(&p, "drc_deck") {
             Ok(d) => return Some(d),
             Err(e) => {
-                eprintln!("error: {e}");
+                diag!("error: {e}");
                 exit(2);
             }
         }
@@ -449,36 +470,36 @@ fn main() {
     // `fill` is a generator (GDS in -> filled GDS out), not a report — handle early.
     if args[0] == "fill" {
         let Some(gds) = args.get(1).filter(|a| !a.starts_with('-')) else {
-            eprintln!("error: `fill` needs a GDS path\n{USAGE}");
+            diag!("error: `fill` needs a GDS path\n{USAGE}");
             exit(2);
         };
         let Some(deck) = deck_arg(&args) else {
-            eprintln!("error: `fill` needs --rules DECK or --pdk NAME\n{USAGE}");
+            diag!("error: `fill` needs --rules DECK or --pdk NAME\n{USAGE}");
             exit(2);
         };
         let Some(out) = opt(&args, "-o") else {
-            eprintln!("error: `fill` needs -o OUT.gds\n{USAGE}");
+            diag!("error: `fill` needs -o OUT.gds\n{USAGE}");
             exit(2);
         };
         let lib = Library::load_any(gds).unwrap_or_else(|e| {
-            eprintln!("error: {gds}: {e}");
+            diag!("error: {gds}: {e}");
             exit(1);
         });
         let rules = Rules::load(&deck).unwrap_or_else(|e| {
-            eprintln!("error: {e}");
+            diag!("error: {e}");
             exit(1);
         });
         if rules.fill.is_empty() {
-            eprintln!("error: the deck defines no `fill` rules");
+            diag!("error: the deck defines no `fill` rules");
             exit(2);
         }
         let (filled, n) = drc::fill_library(&lib, opt(&args, "--top").as_deref(), &rules)
             .unwrap_or_else(|e| {
-                eprintln!("error: {e}");
+                diag!("error: {e}");
                 exit(1);
             });
         filled.save(&out).unwrap_or_else(|e| {
-            eprintln!("error: {out}: {e}");
+            diag!("error: {out}: {e}");
             exit(1);
         });
         if !json {
@@ -490,19 +511,19 @@ fn main() {
     let (lib, rules, top) = match args[0].as_str() {
         "check" => {
             let Some(gds) = args.get(1).filter(|a| !a.starts_with('-')) else {
-                eprintln!("error: `check` needs a GDS path\n{USAGE}");
+                diag!("error: `check` needs a GDS path\n{USAGE}");
                 exit(2);
             };
             let Some(deck) = deck_arg(&args) else {
-                eprintln!("error: `check` needs --rules DECK or --pdk NAME\n{USAGE}");
+                diag!("error: `check` needs --rules DECK or --pdk NAME\n{USAGE}");
                 exit(2);
             };
             let lib = Library::load_any(gds).unwrap_or_else(|e| {
-                eprintln!("error: {gds}: {e}");
+                diag!("error: {gds}: {e}");
                 exit(1);
             });
             let rules = Rules::load(&deck).unwrap_or_else(|e| {
-                eprintln!("error: {e}");
+                diag!("error: {e}");
                 exit(1);
             });
             (lib, rules, opt(&args, "--top"))
@@ -542,14 +563,14 @@ fn main() {
             (lib, Rules::parse(deck).unwrap(), None)
         }
         other => {
-            eprintln!("error: unknown command {other:?}\n{USAGE}");
+            diag!("error: unknown command {other:?}\n{USAGE}");
             exit(2);
         }
     };
 
     let (viols, cell) =
         drc::check_library_parts(&lib, top.as_deref(), &rules).unwrap_or_else(|e| {
-            eprintln!("error: {e}");
+            diag!("error: {e}");
             exit(1);
         });
     emit_events(&viols); // vyges-events causal trail on stderr; the report goes to stdout / -o
@@ -560,7 +581,7 @@ fn main() {
     let unchecked = drc::unchecked_layers(&cell, &rules);
     let provenance = views::provenance(&rules, &unchecked);
     if !unchecked.is_empty() {
-        eprintln!(
+        diag!(
             "warning: {} layer(s) carry geometry no rule examines — this run is PARTIAL",
             unchecked.len()
         );
@@ -592,7 +613,7 @@ fn main() {
                 Err(e) => {
                     // Failing to draw a picture must not fail the check: the verdict stands
                     // on the geometry, not on the illustration.
-                    eprintln!("warning: could not render views: {e}");
+                    diag!("warning: could not render views: {e}");
                     Vec::new()
                 }
             }
@@ -611,7 +632,7 @@ fn main() {
     match opt(&args, "-o") {
         Some(path) => {
             if let Err(e) = std::fs::write(&path, &text) {
-                eprintln!("error: {path}: {e}");
+                diag!("error: {path}: {e}");
                 exit(1);
             }
             eprintln!("wrote {path}");
