@@ -109,7 +109,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "vyges-drc"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "vyges-events",
  "vyges-gds-view",
@@ -118,8 +118,8 @@ dependencies = [
 
 [[package]]
 name = "vyges-events"
-version = "0.1.41"
-source = "git+https://github.com/vyges-tools/events?branch=main#dc62f630beaa55f7b3bc25f4cf93192c63c5786d"
+version = "0.1.42"
+source = "git+https://github.com/vyges-tools/events?branch=main#e56d57383fbc4a21c3e4f35e13abb8a750956bb7"
 dependencies = [
  "serde",
  "serde_json",
@@ -127,8 +127,8 @@ dependencies = [
 
 [[package]]
 name = "vyges-gds-view"
-version = "0.1.40"
-source = "git+https://github.com/vyges-tools/gds-view?branch=main#713c7942f6b9d442b61a87ac0eadc030049df7ff"
+version = "0.1.41"
+source = "git+https://github.com/vyges-tools/gds-view?branch=main#a5b79556130fbc4da577b12ed15142c0be8d1843"
 dependencies = [
  "vyges-events",
  "vyges-layout",
@@ -136,13 +136,13 @@ dependencies = [
 
 [[package]]
 name = "vyges-geom"
-version = "0.1.41"
-source = "git+https://github.com/vyges-tools/geom?branch=main#3127d9b8392325c766d2e79dd0f632dd37199d68"
+version = "0.1.42"
+source = "git+https://github.com/vyges-tools/geom?branch=main#79bc9c6ef94df703a56d07ab4219fa5d79d54bcb"
 
 [[package]]
 name = "vyges-layout"
-version = "0.1.41"
-source = "git+https://github.com/vyges-tools/layout?branch=main#da309b2e8c286a3d5db41025fbb1b26df3c1e5e7"
+version = "0.1.42"
+source = "git+https://github.com/vyges-tools/layout?branch=main#ca6ff39f09ce193e70b859c15c89aa72f81bd9ff"
 dependencies = [
  "miniz_oxide",
  "vyges-geom",
