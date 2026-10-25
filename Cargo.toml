@@ -10,6 +10,11 @@ repository = "https://github.com/vyges-tools/drc"
 
 # No third-party deps (builds/tests offline). The GDS / geometry kernel comes from
 # the vyges-layout foundation — the same kernel vyges-lvs rides on.
+[features]
+# The command-line entry built into the library too (`cli_main`), for the suite binaries
+# that link every engine and run the one they are invoked as.
+suite = []
+
 [dependencies]
 vyges-layout = { git = "https://github.com/vyges-tools/layout", branch = "main" }
 # Structured events (vyges-events/1.0) for the MCP causal trail. Core-only (no tracing
