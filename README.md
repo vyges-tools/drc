@@ -7,9 +7,8 @@ per-layer **rule deck** in, a list of **violations** out.
 > open standards and plain file formats — and meant to be accessible to everyone,
 > not only teams who can license a six-figure tool. `vyges-drc` opens up DRC.
 
-> **Stability: experimental (v0.1.6).** The fourteen rule classes below are real and
-> tested, but this is an early engine — see **Current state** for exactly what is
-> and isn't covered. Treat it as an inner-loop checker, not tape-out sign-off.
+> **Stability: stable, actively developed.** The fourteen rule classes below are real and
+> tested — see **Current state** for exactly what is and isn't covered. Treat it as an inner-loop checker, not tape-out sign-off.
 
 ## Why this exists
 
