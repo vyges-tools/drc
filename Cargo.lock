@@ -127,8 +127,8 @@ dependencies = [
 
 [[package]]
 name = "vyges-gds-view"
-version = "0.1.53"
-source = "git+https://github.com/vyges-tools/gds-view?branch=main#330fab3d0c7b657077988edf90f2afd9a66979d5"
+version = "0.1.54"
+source = "git+https://github.com/vyges-tools/gds-view?branch=main#cbf85ffa3714ba281a5cd1dd19cbf49d6258a0c5"
 dependencies = [
  "vyges-events",
  "vyges-layout",
@@ -142,7 +142,7 @@ source = "git+https://github.com/vyges-tools/geom?branch=main#3bda7ec0effd1dbb17
 [[package]]
 name = "vyges-layout"
 version = "0.1.54"
-source = "git+https://github.com/vyges-tools/layout?branch=main#33865d23a53197da256108df807dd3ba71699bbb"
+source = "git+https://github.com/vyges-tools/layout?branch=main#faf4f89490bddda2bbb53aa1b812fa636270068c"
 dependencies = [
  "miniz_oxide",
  "vyges-geom",
