@@ -13,23 +13,64 @@ on:
         description: "Release tag to create (e.g. v0.0.1)"
         required: true
         type: string
+      backfill_macos:
+        description: "Build ONLY the macOS leg at `tag` and attach it to that existing release"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
+  # Which legs to build. A tag push or an ordinary dispatch builds every leg; a backfill dispatch
+  # (backfill_macos=true, tag=<existing release>) builds ONLY the macOS leg at that tag and attaches
+  # it to the release already published. GitHub's hosted macOS capacity is not always there, and a
+  # release ships on Linux green without it; the macOS assets follow by backfill:
+  #   gh workflow run release.yml -R <repo> -f tag=<tag> -f backfill_macos=true
+  # The leg list lives in this job because a job-level `if:` cannot see `matrix`.
+  plan:
+    name: plan
+    runs-on: ubuntu-${{ vars.VYGES_UBUNTU_VERSION || '24.04' }}
+    outputs:
+      include: ${{ steps.legs.outputs.include }}
+    steps:
+      - id: legs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BACKFILL: ${{ inputs.backfill_macos && 'true' || 'false' }}
+          TAG: ${{ inputs.tag }}
+          LEGS: >-
+            [
+              {"os": "macos-${{ vars.VYGES_MACOS_VERSION || '15' }}", "target": "aarch64-apple-darwin"},
+              {"os": "ubuntu-${{ vars.VYGES_UBUNTU_VERSION || '24.04' }}", "target": "x86_64-unknown-linux-gnu"},
+              {"os": "ubuntu-${{ vars.VYGES_UBUNTU_VERSION || '24.04' }}-arm", "target": "aarch64-unknown-linux-gnu"}
+            ]
+        run: |
+          set -euo pipefail
+          if [ "$BACKFILL" = true ]; then
+            [ -n "$TAG" ] || { echo "::error::backfill_macos needs tag=<an existing release>"; exit 1; }
+            gh release view "$TAG" >/dev/null \
+              || { echo "::error::no release $TAG to backfill: it is published by the tag run first"; exit 1; }
+            LEGS=$(jq -c '[.[] | select(.target == "aarch64-apple-darwin")]' <<<"$LEGS")
+          fi
+          echo "include=$(jq -c . <<<"$LEGS")" >> "$GITHUB_OUTPUT"
+
   build:
     name: build · ${{ matrix.target }}
+    needs: plan
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: "macos-${{ vars.VYGES_MACOS_VERSION || '15' }}",        target: aarch64-apple-darwin }
-          - { os: "ubuntu-${{ vars.VYGES_UBUNTU_VERSION || '24.04' }}",   target: x86_64-unknown-linux-gnu }
-          - { os: "ubuntu-${{ vars.VYGES_UBUNTU_VERSION || '24.04' }}-arm", target: aarch64-unknown-linux-gnu }
+        include: ${{ fromJSON(needs.plan.outputs.include) }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # backfill: build the released sources (the tag), not the dispatch branch
+          ref: ${{ inputs.backfill_macos && inputs.tag || '' }}
       - name: Tag matches crate version
         run: |
           want="${{ inputs.tag || github.ref_name }}"; want="${want#v}"
@@ -62,15 +103,62 @@ jobs:
           name: ${{ matrix.target }}
           path: "*.tar.gz"
 
+      # macOS backfill (backfill_macos=true): attach this leg's assets to the EXISTING release at
+      # `tag` with `gh release upload --clobber`. It never creates or edits the release. Where the
+      # release carries a SHA256SUMS, its lines for these files are replaced and it is re-uploaded.
+      - name: Backfill macOS assets onto the existing release
+        if: ${{ inputs.backfill_macos }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          cd "$GITHUB_WORKSPACE"
+          tars=( *-"$TARGET".tar.gz )
+          [ ${#tars[@]} -gt 0 ] || { echo "::error::no $TARGET tarball was packaged"; exit 1; }
+          files=( "${tars[@]}" *-"$TARGET".tar.gz.sha256 )
+          if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -qx SHA256SUMS; then
+            sums="$RUNNER_TEMP/sums/SHA256SUMS"
+            gh release download "$TAG" -p SHA256SUMS -D "$RUNNER_TEMP/sums" --clobber
+            for t in "${tars[@]}"; do
+              awk -v t="$t" '$2 != t' "$sums" > "$sums.new"; mv "$sums.new" "$sums"
+            done
+            shasum -a 256 "${tars[@]}" >> "$sums"
+            files+=( "$sums" )
+          fi
+          gh release upload "$TAG" "${files[@]}" --clobber
+          echo "backfilled $TAG: ${files[*]##*/}"
+
   release:
     name: publish release
-    needs: build
+    # Publishes when both Linux legs built, whatever the macOS leg did (failed, or cancelled
+    # because no hosted macOS runner picked it up): the macOS assets follow by backfill. A
+    # backfill dispatch never publishes; it only attaches (see the build job's last step).
+    needs: [plan, build]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && !inputs.backfill_macos }}
     runs-on: ubuntu-${{ vars.VYGES_UBUNTU_VERSION || '24.04' }}
     steps:
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
+      - name: Linux legs required, macOS optional
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            a=( dist/*-"$t".tar.gz )
+            [ ${#a[@]} -gt 0 ] || { echo "::error::no $t asset: a Linux leg did not build, nothing is published"; exit 1; }
+          done
+          a=( dist/*-aarch64-apple-darwin.tar.gz )
+          [ ${#a[@]} -gt 0 ] || echo "::warning::macOS leg did not build: publishing $TAG Linux-only. Backfill: gh workflow run release.yml -R $GITHUB_REPOSITORY -f tag=$TAG -f backfill_macos=true"
       - name: Checksums
         run: cd dist && sha256sum *.tar.gz > SHA256SUMS
       - uses: softprops/action-gh-release@v3
