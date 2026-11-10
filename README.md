@@ -1,5 +1,7 @@
 # vyges-drc
 
+**[Download Loom](https://vyges.com/products/vyges-cli/#install)** · install the free [Vyges CLI](https://vyges.com/products/vyges-cli/), then `vyges install loom`
+
 Geometric **design-rule check**: a laid-out layout (**GDSII** or **OASIS**) + a
 per-layer **rule deck** in, a list of **violations** out.
 
