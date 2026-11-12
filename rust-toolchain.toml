@@ -1,0 +1,4 @@
+# Pinned so CI, release builds and the dev box use one compiler; bump deliberately (fix new lints, re-run gates).
+[toolchain]
+channel = "1.100.0"
+components = ["clippy"]
