@@ -11,9 +11,14 @@ repository = "https://github.com/vyges-tools/drc"
 # No third-party deps (builds/tests offline). The GDS / geometry kernel comes from
 # the vyges-layout foundation — the same kernel vyges-lvs rides on.
 [features]
+default = ["mimalloc"]
 # The command-line entry built into the library too (`cli_main`), for the suite binaries
 # that link every engine and run the one they are invoked as.
 suite = []
+
+# The binary's allocator (see [dependencies]). On by default for the binary; the suite, the only
+# library consumer, links it too.
+mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 
 [dependencies]
 vyges-layout = { git = "https://github.com/vyges-tools/layout", branch = "main" }
@@ -24,6 +29,19 @@ vyges-events = { git = "https://github.com/vyges-tools/events", branch = "main",
 # uses, so this adds a renderer rather than a second geometry stack.
 vyges-gds-view = { git = "https://github.com/vyges-tools/gds-view", branch = "main" }
 
+# The binary's global allocator. The reference build links tcmalloc for all of its code
+# (BUILD.bazel `malloc = @tcmalloc`), not the system allocator; mimalloc measured fastest and
+# smallest of tcmalloc / jemalloc / mimalloc on a like-for-like trial. Pinned exactly:
+# libmimalloc-sys 0.1.44 bundles mimalloc v2 by default (0.1.45 on default to v3).
+mimalloc = { version = "=0.1.48", default-features = false, optional = true }
+libmimalloc-sys = { version = "=0.1.44", default-features = false, optional = true }
+
+# On Linux the allocator also REPLACES malloc/free process-wide (`override`), so C++ code linked
+# into the binary allocates through it too, as the reference's statically linked tcmalloc does for
+# all of its code. Not on macOS, where the system zone allocator is left alone.
+[target.'cfg(target_os = "linux")'.dependencies]
+libmimalloc-sys = { version = "=0.1.44", default-features = false, features = ["override"], optional = true }
+
 [[bin]]
 name = "vyges-drc"
 path = "src/main.rs"
@@ -31,3 +49,9 @@ path = "src/main.rs"
 [lib]
 name = "vyges_drc"
 path = "src/lib.rs"
+
+# The reference is built -O3 with link-time optimisation (Bazel --config=release). LTO and one
+# codegen unit let calls inline across crates; by language rule neither changes a result.
+[profile.release]
+lto = "fat"
+codegen-units = 1
