@@ -1,0 +1,20 @@
+# Shared build settings (vyges-tools/build-config): rust toolchain, release profile, compiler
+# flags and CI runner versions. Read-only check; see vyges-tools/actions build-config-check.
+name: build-config
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: build-config check
+    runs-on: ubuntu-${{ vars.VYGES_UBUNTU_VERSION || '24.04' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: vyges-tools/actions/build-config-check@v1.1.0
