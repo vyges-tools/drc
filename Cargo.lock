@@ -156,7 +156,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "vyges-drc"
-version = "0.1.55"
+version = "0.1.56"
 dependencies = [
  "libmimalloc-sys",
  "mimalloc",
@@ -167,17 +167,18 @@ dependencies = [
 
 [[package]]
 name = "vyges-events"
-version = "0.1.55"
-source = "git+https://github.com/vyges-tools/events?branch=main#87cca49dfd0e7030b890a084472a00930bcfb45e"
+version = "0.1.56"
+source = "git+https://github.com/vyges-tools/events?branch=main#fbeaba52516c5a210cf37648edd1327f28596420"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "vyges-gds-view"
-version = "0.1.54"
-source = "git+https://github.com/vyges-tools/gds-view?branch=main#5920438bb4db505bc44df2973a4749e6a6e13a1d"
+version = "0.1.55"
+source = "git+https://github.com/vyges-tools/gds-view?branch=main#8b13b917c5e19d57a31c6f92387c7e648dbd6b6f"
 dependencies = [
  "vyges-events",
  "vyges-layout",
@@ -185,13 +186,13 @@ dependencies = [
 
 [[package]]
 name = "vyges-geom"
-version = "0.1.55"
-source = "git+https://github.com/vyges-tools/geom?branch=main#db386f6ab471a40a4934541e6fe35c608f792940"
+version = "0.1.56"
+source = "git+https://github.com/vyges-tools/geom?branch=main#64a18df2ab38a6ca7ee409f25ce82a4501018725"
 
 [[package]]
 name = "vyges-layout"
-version = "0.1.55"
-source = "git+https://github.com/vyges-tools/layout?branch=main#843e4a36165cd640c478d09c6cc2c912b4b01953"
+version = "0.1.56"
+source = "git+https://github.com/vyges-tools/layout?branch=main#bd8702f42f8b933f380e596113a123a45d6a52a3"
 dependencies = [
  "miniz_oxide",
  "vyges-geom",
