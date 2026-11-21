@@ -177,8 +177,8 @@ dependencies = [
 
 [[package]]
 name = "vyges-gds-view"
-version = "0.1.55"
-source = "git+https://github.com/vyges-tools/gds-view?branch=main#8b13b917c5e19d57a31c6f92387c7e648dbd6b6f"
+version = "0.1.56"
+source = "git+https://github.com/vyges-tools/gds-view?branch=main#f4ffe8b465fa428db0ce51429ab1ae7837026909"
 dependencies = [
  "vyges-events",
  "vyges-layout",
