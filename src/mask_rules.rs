@@ -21,6 +21,7 @@
 //! orthogonal  R.C.1_A       20/1
 //! rectangle   R.CF.C.1      20/53+20/54
 //! size        R.CF.LW.1     20/53 20/54 280 280
+//! widespace   R.WS.1        20/0 20/1 20/2 120 50                    [to=W] [run=R]
 //! notchecked  R.C.10_A      why it is not checked, free text
 //! ```
 //!
@@ -62,6 +63,9 @@
 //! - `hole L... a`: an enclosed hole whose area is below `a`.
 //! - `shortvertex L... d`: a boundary vertex whose two edges are both shorter than `d`.
 //! - `orthogonal L...`: a drawn polygon edge that is neither horizontal nor vertical.
+//! - `widespace L... w d [to=w2] [run=r]`: the part of the union wider than `w` (an opening: shrink
+//!   by `w / 2`, grow back; `w` even) facing the union, or with `to=` its part wider than `w2`,
+//!   across space closer than `d`, side to side only, the shared run longer than `r` (default 0).
 //! - `rectangle L...`: a merged polygon (of the union) that is not a rectangle.
 //! - `size L... w h`: a merged polygon that is not a `w` by `h` rectangle, either way round.
 //! - `notchecked` states a rule the file knows of and this engine does not check, so the report
@@ -120,6 +124,9 @@ pub enum Kind {
     Orthogonal { layers: Vec<Layer> },
     Rectangle { layers: Vec<Layer> },
     Size { layers: Vec<Layer>, w: i64, h: i64 },
+    /// The wide part (width > `w`) of the union facing the union (or, `to=`, its part wider than
+    /// `to`) across space closer than `d`, side to side only, run length above `run`.
+    WideSpace { layers: Vec<Layer>, w: i64, d: i64, to: Option<i64>, run: i64 },
     NotChecked { why: String },
 }
 
@@ -154,6 +161,7 @@ impl MaskRule {
             Kind::Orthogonal { .. } => "orthogonal",
             Kind::Rectangle { .. } => "rectangle",
             Kind::Size { .. } => "size",
+            Kind::WideSpace { .. } => "widespace",
             Kind::NotChecked { .. } => "notchecked",
         }
     }
@@ -310,6 +318,19 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
                 let min_extent = opt("minextent")?.unwrap_or(0);
                 Kind::Ratio { num, den, window, step, min, max, exempt, inside: l("inside")?, min_extent }
             }
+            "widespace" => {
+                if pos.len() < 3 {
+                    return Err(err("wrong number of arguments"));
+                }
+                let layers: Vec<Layer> = pos[..pos.len() - 2].iter().map(|s| Layer::parse(s).ok_or_else(|| err("expected a layer"))).collect::<Result<_, _>>()?;
+                let (w, d) = (num(pos.len() - 2)?, num(pos.len() - 1)?);
+                let to = opt("to")?;
+                // the wide part is an opening by half the width: an odd width has no whole half
+                if w % 2 != 0 || to.is_some_and(|t| t % 2 != 0) {
+                    return Err(err("widespace widths must be even (DB units)"));
+                }
+                Kind::WideSpace { layers, w, d, to, run: opt("run")?.unwrap_or(0) }
+            }
             "width" | "area" | "hole" | "shortvertex" | "orthogonal" | "rectangle" | "size" => {
                 // layers (their union), then the value; `orthogonal` and `rectangle` take none, `size` two
                 let nv = match kind {
@@ -367,6 +388,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
             "eol" => &["eolmax", "adjmin", "ext", "lenlt", "lenge", "to", "toeol"],
             "ratio" => &["window", "step", "min", "max", "exempt", "inside", "minextent"],
             "area" => &["shape"],
+            "widespace" => &["to", "run"],
             _ => &[],
         };
         if let Some(k) = kv.keys().find(|k| !allowed.contains(k)) {
@@ -391,6 +413,13 @@ struct Merged {
 }
 
 impl Merged {
+    fn from_tiles(tiles: &[Rect]) -> Merged {
+        let tiles = boolean::boolean(tiles, &[], Op::Or);
+        let idx = RegionIndex::build(&tiles);
+        let rings = trace_contours(&tiles).iter().map(|r| ring_edges(r)).collect();
+        Merged { tiles, idx, rings }
+    }
+
     fn new(polys: &[Vec<(i32, i32)>]) -> Merged {
         let tiles = boolean::boolean_poly(polys, &[], Op::Or);
         let idx = RegionIndex::build(&tiles);
@@ -421,6 +450,23 @@ impl Merged {
             t.x0 <= q.x1 && q.x0 <= t.x1 && t.y0 <= q.y1 && q.y0 <= t.y1
         })
     }
+}
+
+fn grown(t: &Rect, r: i32) -> Rect {
+    Rect { x0: t.x0 - r, y0: t.y0 - r, x1: t.x1 + r, y1: t.y1 + r }
+}
+
+/// The part of the region wider than `w` (`w` even): shrink by `w / 2`, then grow back by the
+/// same (square sizing), within the region. A strip exactly `w` wide shrinks to nothing; one DB
+/// unit wider survives. This is the wide part of a polygon, not the whole polygon that has one.
+fn wide_part(m: &Merged, w: i64) -> Merged {
+    let r = (w / 2) as i32;
+    let Some(bb) = bbox_of(&m.tiles) else { return Merged::from_tiles(&[]) };
+    let outside = boolean::boolean(&[grown(&bb, r + 1)], &m.tiles, Op::Not);
+    let reach: Vec<Rect> = outside.iter().map(|t| grown(t, r)).collect();
+    let core = boolean::boolean(&m.tiles, &reach, Op::Not);
+    let back: Vec<Rect> = core.iter().map(|t| grown(t, r)).collect();
+    Merged::from_tiles(&boolean::boolean(&back, &m.tiles, Op::And))
 }
 
 fn seg(e: &Edge) -> [i32; 4] {
@@ -484,7 +530,8 @@ fn eol_gap(e: &Edge, r: &Rect) -> i64 {
 
 /// External spacing between edges of `ea` (layer A) and `eb` (layer B): parallel, facing each
 /// other (outward normals toward each other), closer than `d`, across space in neither region.
-fn ext_pairs(ea: &[Edge], eb: &[Edge], d: i64, ma: &Merged, mb: &Merged) -> Vec<Marker> {
+/// `run`: side to side only (projecting), with the shared run longer than this.
+fn ext_pairs(ea: &[Edge], eb: &[Edge], d: i64, ma: &Merged, mb: &Merged, run: Option<i64>) -> Vec<Marker> {
     let boxes: Vec<Rect> = eb.iter().map(bbox_edge).collect();
     let idx = RegionIndex::build(&boxes);
     let d2 = d * d;
@@ -501,6 +548,16 @@ fn ext_pairs(ea: &[Edge], eb: &[Edge], d: i64, ma: &Merged, mb: &Merged) -> Vec<
             let ds = dx * dx + dy * dy;
             if ds == 0 || ds >= d2 {
                 continue;
+            }
+            if let Some(r) = run {
+                if !projecting_edges(a, b) {
+                    continue;
+                }
+                let (ra, rb) = (bbox_edge(a), bbox_edge(b));
+                let shared = if a.axis() == Axis::Horizontal { ra.x1.min(rb.x1) - ra.x0.max(rb.x0) } else { ra.y1.min(rb.y1) - ra.y0.max(rb.y0) };
+                if i64::from(shared) <= r {
+                    continue;
+                }
             }
             // facing: along the separating direction for a side-to-side pair, along the
             // diagonal for a corner pair
@@ -738,7 +795,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 want.extend(num.iter().chain(den).chain(exempt).copied());
                 want.extend(inside.iter().copied());
             }
-            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } => {
+            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::WideSpace { layers, .. } => {
                 want.extend(layers.iter().copied());
             }
             Kind::NotChecked { .. } => {}
@@ -811,7 +868,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured, range_ppm });
                 continue;
             }
-            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } => {
+            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::WideSpace { layers, .. } => {
                 let m: &Merged = if layers.len() > 1 {
                     unions.entry(layers.clone()).or_insert_with(|| {
                         let v: Vec<Vec<(i32, i32)>> = layers.iter().flat_map(|l| polys.get(l).cloned().unwrap_or_default()).collect();
@@ -825,12 +882,12 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
             Kind::Space { layers, d } => {
                 let m = if layers.len() > 1 { &unions[layers] } else { &merged[&layers[0]] };
                 let e = m.edges();
-                (*d, ext_pairs(&e, &e, *d, m, m))
+                (*d, ext_pairs(&e, &e, *d, m, m, None))
             }
             Kind::Space2 { a, b, d, touch } => {
                 let ma = if a.len() > 1 { &unions[a] } else { &merged[&a[0]] };
                 let mb = if b.len() > 1 { &unions[b] } else { &merged[&b[0]] };
-                let mut found = ext_pairs(&ma.edges(), &mb.edges(), *d, ma, mb);
+                let mut found = ext_pairs(&ma.edges(), &mb.edges(), *d, ma, mb, None);
                 if *touch {
                     found.extend(stitches(ma, mb));
                 }
@@ -925,6 +982,18 @@ fn shape_rule(kind: &Kind, m: &Merged, layers: &[Layer], polys: &BTreeMap<Layer,
         Kind::Orthogonal { .. } => (0, off_axis(layers, polys)),
         Kind::Rectangle { .. } => (0, not_sized(m, None)),
         Kind::Size { w, h, .. } => (*w, not_sized(m, Some((*w, *h)))),
+        Kind::WideSpace { w, d, to, run, .. } => {
+            let a = wide_part(m, *w);
+            let other;
+            let b: &Merged = match to {
+                Some(t) => {
+                    other = wide_part(m, *t);
+                    &other
+                }
+                None => m,
+            };
+            (*d, ext_pairs(&a.edges(), &b.edges(), *d, &a, b, Some(*run)))
+        }
         _ => (0, Vec::new()),
     }
 }
@@ -1401,6 +1470,35 @@ mod tests {
         assert_eq!(count(n, vec![bx(1, 1, 0, 0, 280, 280), bx(2, 0, 280, 0, 600, 280)]), 0, "touching, no touch");
         assert!(parse("space2 T 1/1 2/0 200 touch").is_ok());
         assert!(parse("space T 1/1 200 touch").is_err());
+    }
+
+    /// Rule (widespace): the part of the union wider than w facing the union side to side closer
+    /// than d. A polygon's narrow arm is not its wide part; exactly w wide is not wide; a corner
+    /// is not side to side; `run` drops a shared run no longer than it; `to=` measures to the
+    /// other side's own wide part only.
+    #[test]
+    fn wide_metal_space_is_measured_from_the_wide_part() {
+        let r = "widespace W 1/1 1/2 120 50";
+        // 200 wide, a 40-wide wire beside it (across masks: the union)
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 1000, 200), bx(1, 2, 0, 249, 1000, 289)]), 1, "49");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 1000, 200), bx(1, 2, 0, 250, 1000, 290)]), 0, "50");
+        // exactly 120 wide is not wide; 122 is
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 1000, 120), bx(1, 2, 0, 160, 1000, 200)]), 0, "120");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 1000, 122), bx(1, 2, 0, 162, 1000, 202)]), 1, "122");
+        // a wide block with a 40-wide arm: a wire facing only the arm is not measured from a wide part
+        let arm = vec![bx(1, 1, 0, 0, 200, 200), bx(1, 1, 200, 0, 1000, 40), bx(1, 2, 300, 80, 1000, 120)];
+        assert_eq!(count(r, arm), 0, "the arm is narrow");
+        // a corner neighbour 30 x 30 away diagonally: closer than 50, but not side to side
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 200, 200), bx(1, 2, 230, 230, 400, 270)]), 0, "corner");
+        // run: a 250-long shared run is not more than 250
+        let run = "widespace W 1/1 120 80 run=250";
+        assert_eq!(count(run, vec![bx(1, 1, 0, 0, 1000, 250), bx(1, 1, 0, 300, 250, 340)]), 0, "run 250");
+        assert_eq!(count(run, vec![bx(1, 1, 0, 0, 1000, 250), bx(1, 1, 0, 300, 251, 340)]), 1, "run 251");
+        // to=: to the other side's part wider than 60 only
+        let to = "widespace W 1/1 120 56 to=60";
+        assert_eq!(count(to, vec![bx(1, 1, 0, 0, 1000, 200), bx(1, 1, 0, 250, 1000, 290)]), 0, "a 40 wire is not wider than 60");
+        assert_eq!(count(to, vec![bx(1, 1, 0, 0, 1000, 200), bx(1, 1, 0, 250, 1000, 330)]), 1, "an 80 wire is");
+        assert!(parse("widespace W 1/1 121 50").is_err(), "odd width");
     }
 
     /// Rule (rectangle, size): a merged polygon that is not a rectangle; one that is not w by h
