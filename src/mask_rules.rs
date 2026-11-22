@@ -14,6 +14,11 @@
 //! oddcycle    R.colour      20/1 20/2 66
 //! stitch      R.stitch      20/1 20/2
 //! ratio       R.DEN.7       20/1 / 20/1 20/2 20/0   window=25000 step=12500 min=0.2   [exempt=L,L..] [inside=L] [minextent=D]
+//! width       R.W.1_A       20/1 32
+//! area        R.A.1         20/1 20/2 8800                           [shape=rect | shape=notrect]
+//! hole        R.A.4         20/1 20/2 48000
+//! shortvertex R.SE.1_A      20/1 57
+//! orthogonal  R.C.1_A       20/1
 //! notchecked  R.C.10_A      why it is not checked, free text
 //! ```
 //!
@@ -45,6 +50,14 @@
 //!   per million.
 //! - `exclude=L` drops a result whose shapes both lie in layer L (touch it); `only=L` keeps only
 //!   those. A region marker, read by interaction.
+//! - `width L... d`: over the union of the layers, two boundary edges of one polygon facing each
+//!   other across its inside (side to side), closer than `d`, the rectangle between them wholly
+//!   inside: the minimum width.
+//! - `area L... a [shape=rect|notrect]`: a merged polygon (tiles sharing an edge) whose area is
+//!   below `a` (DB units squared); `shape=` keeps only rectangles or only other polygons.
+//! - `hole L... a`: an enclosed hole whose area is below `a`.
+//! - `shortvertex L... d`: a boundary vertex whose two edges are both shorter than `d`.
+//! - `orthogonal L...`: a drawn polygon edge that is neither horizontal nor vertical.
 //! - `notchecked` states a rule the file knows of and this engine does not check, so the report
 //!   says so instead of letting silence read as clean.
 //!
@@ -87,7 +100,25 @@ pub enum Kind {
     OddCycle { a: Layer, b: Layer, d: i64 },
     Stitch { a: Layer, b: Layer },
     Ratio { num: Vec<Layer>, den: Vec<Layer>, window: i64, step: i64, min: Option<i64>, max: Option<i64>, exempt: Vec<Layer>, inside: Option<Layer>, min_extent: i64 },
+    /// Interior width below `d` (over the union of `layers`).
+    Width { layers: Vec<Layer>, d: i64 },
+    /// Polygon area below `a` (DB units squared), optionally only rectangles or only non-rectangles.
+    Area { layers: Vec<Layer>, a: i64, shape: AreaShape },
+    /// Enclosed hole area below `a`.
+    Hole { layers: Vec<Layer>, a: i64 },
+    /// A vertex whose two edges are both shorter than `d`.
+    ShortVertex { layers: Vec<Layer>, d: i64 },
+    /// An edge that is neither horizontal nor vertical (on the drawn polygons).
+    Orthogonal { layers: Vec<Layer> },
     NotChecked { why: String },
+}
+
+/// Which polygons an `area` rule measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AreaShape {
+    Any,
+    Rect,
+    NotRect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +137,11 @@ impl MaskRule {
             Kind::OddCycle { .. } => "oddcycle",
             Kind::Stitch { .. } => "stitch",
             Kind::Ratio { .. } => "ratio",
+            Kind::Width { .. } => "width",
+            Kind::Area { .. } => "area",
+            Kind::Hole { .. } => "hole",
+            Kind::ShortVertex { .. } => "shortvertex",
+            Kind::Orthogonal { .. } => "orthogonal",
             Kind::NotChecked { .. } => "notchecked",
         }
     }
@@ -120,6 +156,8 @@ pub enum Marker {
     Cycle { boxes: Vec<Rect> },
     /// A window and its ratio, parts per million.
     Window { rect: Rect, ppm: i64 },
+    /// A polygon (or hole), by its bounding box, and the measured value (an area).
+    Shape { rect: Rect, value: i64 },
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +285,30 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
                 let min_extent = opt("minextent")?.unwrap_or(0);
                 Kind::Ratio { num, den, window, step, min, max, exempt, inside: l("inside")?, min_extent }
             }
+            "width" | "area" | "hole" | "shortvertex" | "orthogonal" => {
+                // layers (their union), then the value; `orthogonal` takes no value
+                let nv = usize::from(kind != "orthogonal");
+                if pos.len() < 1 + nv {
+                    return Err(err("wrong number of arguments"));
+                }
+                let layers: Vec<Layer> = pos[..pos.len() - nv].iter().map(|s| Layer::parse(s).ok_or_else(|| err("expected a layer"))).collect::<Result<_, _>>()?;
+                let v = if nv == 1 { num(pos.len() - 1)? } else { 0 };
+                match kind {
+                    "width" => Kind::Width { layers, d: v },
+                    "hole" => Kind::Hole { layers, a: v },
+                    "shortvertex" => Kind::ShortVertex { layers, d: v },
+                    "orthogonal" => Kind::Orthogonal { layers },
+                    _ => {
+                        let shape = match kv.get("shape").copied() {
+                            None | Some("any") => AreaShape::Any,
+                            Some("rect") => AreaShape::Rect,
+                            Some("notrect") => AreaShape::NotRect,
+                            Some(_) => return Err(err("shape= is any, rect or notrect")),
+                        };
+                        Kind::Area { layers, a: v, shape }
+                    }
+                }
+            }
             "eol" => {
                 want(2)?;
                 let to = match (kv.get("to"), toeol) {
@@ -272,6 +334,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
         let allowed: &[&str] = match kind {
             "eol" => &["eolmax", "adjmin", "ext", "lenlt", "lenge", "to"],
             "ratio" => &["window", "step", "min", "max", "exempt", "inside", "minextent"],
+            "area" => &["shape"],
             _ => &[],
         };
         if let Some(k) = kv.keys().find(|k| !allowed.contains(k)) {
@@ -637,6 +700,9 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 want.extend(num.iter().chain(den).chain(exempt).copied());
                 want.extend(inside.iter().copied());
             }
+            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Orthogonal { layers } => {
+                want.extend(layers.iter().copied());
+            }
             Kind::NotChecked { .. } => {}
         }
         if let Region::Exclude(l) | Region::Only(l) = r.region {
@@ -648,6 +714,16 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
         let (l, p) = elem_poly(e);
         if let Some(p) = p.filter(|_| want.contains(&l)) {
             polys.entry(l).or_default().push(p);
+        }
+    }
+    // the drawn outlines as written (the merge squares off a non-orthogonal polygon), for `orthogonal`
+    let mut drawn: BTreeMap<Layer, Vec<Vec<(i32, i32)>>> = BTreeMap::new();
+    for e in &cell.elements {
+        if let crate::layout::gds::Element::Boundary { layer, datatype, pts } = e {
+            let l = Layer::new(*layer, *datatype);
+            if want.contains(&l) {
+                drawn.entry(l).or_default().push(pts.clone());
+            }
         }
     }
     let merged: BTreeMap<Layer, Merged> = want.iter().map(|l| (*l, Merged::new(polys.get(l).map_or(&[][..], |v| v)))).collect();
@@ -680,6 +756,17 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 let limit = min.or(*max).unwrap_or(0);
                 out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured, range_ppm });
                 continue;
+            }
+            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Orthogonal { layers } => {
+                let m: &Merged = if layers.len() > 1 {
+                    unions.entry(layers.clone()).or_insert_with(|| {
+                        let v: Vec<Vec<(i32, i32)>> = layers.iter().flat_map(|l| polys.get(l).cloned().unwrap_or_default()).collect();
+                        Merged::new(&v)
+                    })
+                } else {
+                    &merged[&layers[0]]
+                };
+                shape_rule(&r.kind, m, layers, &drawn)
             }
             Kind::Space { layer, d } => {
                 let m = &merged[layer];
@@ -756,7 +843,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                         let inside = match mk {
                             Marker::Edges { a, b, .. } => m.touches(&seg_box(a)) && m.touches(&seg_box(b)),
                             Marker::Cycle { boxes } => boxes.iter().all(|b| m.touches(b)),
-                            Marker::Window { rect, .. } => m.touches(rect),
+                            Marker::Window { rect, .. } | Marker::Shape { rect, .. } => m.touches(rect),
                         };
                         inside == keep_inside
                     })
@@ -766,6 +853,182 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
         out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured: 0, range_ppm: None });
     }
     Ok(out)
+}
+
+/// The shape rules (`width`, `area`, `hole`, `shortvertex`, `orthogonal`) on merged region `m`
+/// (the union of `layers`); `polys` holds the drawn polygons, for `orthogonal`.
+fn shape_rule(kind: &Kind, m: &Merged, layers: &[Layer], polys: &BTreeMap<Layer, Vec<Vec<(i32, i32)>>>) -> (i64, Vec<Marker>) {
+    match kind {
+        Kind::Width { d, .. } => (*d, narrow(m, *d)),
+        Kind::Area { a, shape, .. } => (*a, small_polygons(m, *a, *shape)),
+        Kind::Hole { a, .. } => (*a, small_holes(m, *a)),
+        Kind::ShortVertex { d, .. } => (*d, short_vertices(m, *d)),
+        Kind::Orthogonal { .. } => (0, off_axis(layers, polys)),
+        _ => (0, Vec::new()),
+    }
+}
+
+/// Interior width below `d`: two boundary edges of one region facing each other across its
+/// inside (parallel, opposite outward normals, overlapping along their length), closer than `d`,
+/// with the rectangle between them wholly inside the region. The projecting (side to side) form.
+fn narrow(m: &Merged, d: i64) -> Vec<Marker> {
+    let edges = m.edges();
+    let boxes: Vec<Rect> = edges.iter().map(bbox_edge).collect();
+    let idx = RegionIndex::build(&boxes);
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (i, a) in edges.iter().enumerate() {
+        let (ox, oy) = outward_edge(a);
+        for j in idx.within(&bbox_edge(a), d as i32, None) {
+            let b = &edges[j as usize];
+            if j as usize == i || b.axis() != a.axis() || outward_edge(b) != (-ox, -oy) || !projecting_edges(a, b) {
+                continue;
+            }
+            let (ba, bb) = (bbox_edge(a), bbox_edge(b));
+            // b lies on a's inner side: against a's outward normal
+            let (gap, between) = if a.axis() == Axis::Horizontal {
+                let g = if oy > 0 { i64::from(ba.y0) - i64::from(bb.y0) } else { i64::from(bb.y0) - i64::from(ba.y0) };
+                let (x0, x1) = (ba.x0.max(bb.x0), ba.x1.min(bb.x1));
+                (g, Rect { x0, y0: ba.y0.min(bb.y0), x1, y1: ba.y0.max(bb.y0) })
+            } else {
+                let g = if ox > 0 { i64::from(ba.x0) - i64::from(bb.x0) } else { i64::from(bb.x0) - i64::from(ba.x0) };
+                let (y0, y1) = (ba.y0.max(bb.y0), ba.y1.min(bb.y1));
+                (g, Rect { x0: ba.x0.min(bb.x0), y0, x1: ba.x0.max(bb.x0), y1 })
+            };
+            if gap <= 0 || gap >= d {
+                continue;
+            }
+            let want = i64::from(between.x1 - between.x0) * i64::from(between.y1 - between.y0);
+            let have: i64 = m
+                .overlaps_open(&between)
+                .unwrap_or_default()
+                .iter()
+                .map(|t| {
+                    let dx = i64::from(t.x1.min(between.x1)) - i64::from(t.x0.max(between.x0));
+                    let dy = i64::from(t.y1.min(between.y1)) - i64::from(t.y0.max(between.y0));
+                    dx.max(0) * dy.max(0)
+                })
+                .sum();
+            if have != want {
+                continue;
+            }
+            let key = if i < j as usize { (i, j as usize) } else { (j as usize, i) };
+            if seen.insert(key) {
+                out.push(Marker::Edges { a: seg(a), b: seg(b), value: gap });
+            }
+        }
+    }
+    out
+}
+
+/// The polygons of a merged region: groups of its tiles that share an edge of positive length.
+fn components(m: &Merged) -> Vec<Vec<usize>> {
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let n = m.tiles.len();
+    let mut p: Vec<usize> = (0..n).collect();
+    for i in 0..n {
+        let a = m.tiles[i];
+        for j in m.idx.within(&a, 1, None) {
+            let j = j as usize;
+            if j <= i {
+                continue;
+            }
+            let b = m.tiles[j];
+            let ox = i64::from(a.x1.min(b.x1)) - i64::from(a.x0.max(b.x0));
+            let oy = i64::from(a.y1.min(b.y1)) - i64::from(a.y0.max(b.y0));
+            if ox >= 0 && oy >= 0 && (ox > 0 || oy > 0) {
+                let (ra, rb) = (find(&mut p, i), find(&mut p, j));
+                p[ra.max(rb)] = ra.min(rb);
+            }
+        }
+    }
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..n {
+        let r = find(&mut p, i);
+        groups.entry(r).or_default().push(i);
+    }
+    groups.into_values().collect()
+}
+
+/// Polygons whose area is below `a`; `shape` keeps only rectangles or only non-rectangles.
+fn small_polygons(m: &Merged, a: i64, shape: AreaShape) -> Vec<Marker> {
+    let mut out = Vec::new();
+    for g in components(m) {
+        let area: i64 = g.iter().map(|&i| {
+            let t = m.tiles[i];
+            i64::from(t.x1 - t.x0) * i64::from(t.y1 - t.y0)
+        }).sum();
+        let bb = bbox_of(&g.iter().map(|&i| m.tiles[i]).collect::<Vec<_>>()).expect("a component has a tile");
+        let is_rect = area == i64::from(bb.x1 - bb.x0) * i64::from(bb.y1 - bb.y0);
+        let keep = match shape {
+            AreaShape::Any => true,
+            AreaShape::Rect => is_rect,
+            AreaShape::NotRect => !is_rect,
+        };
+        if keep && area < a {
+            out.push(Marker::Shape { rect: bb, value: area });
+        }
+    }
+    out
+}
+
+/// Twice the signed area of a ring (positive with the solid on the left, an outer boundary).
+fn ring_area2(r: &[Edge]) -> i64 {
+    r.iter().map(|e| i64::from(e.a.0) * i64::from(e.b.1) - i64::from(e.b.0) * i64::from(e.a.1)).sum()
+}
+
+/// Holes (rings with the solid outside them) whose area is below `a`.
+fn small_holes(m: &Merged, a: i64) -> Vec<Marker> {
+    let mut out = Vec::new();
+    for r in &m.rings {
+        let a2 = ring_area2(r);
+        if a2 < 0 && -a2 < 2 * a {
+            let xs = r.iter().map(|e| e.a.0);
+            let ys = r.iter().map(|e| e.a.1);
+            let rect = Rect { x0: xs.clone().min().unwrap_or(0), y0: ys.clone().min().unwrap_or(0), x1: xs.max().unwrap_or(0), y1: ys.max().unwrap_or(0) };
+            out.push(Marker::Shape { rect, value: -a2 / 2 });
+        }
+    }
+    out
+}
+
+/// Vertices whose two edges are both shorter than `d`.
+fn short_vertices(m: &Merged, d: i64) -> Vec<Marker> {
+    let mut out = Vec::new();
+    for r in &m.rings {
+        let n = r.len();
+        for i in 0..n {
+            let (p, q) = (&r[i], &r[(i + 1) % n]);
+            if p.len() < d && q.len() < d {
+                out.push(Marker::Edges { a: seg(p), b: seg(q), value: p.len().max(q.len()) });
+            }
+        }
+    }
+    out
+}
+
+/// Drawn polygon edges that are neither horizontal nor vertical.
+fn off_axis(layers: &[Layer], polys: &BTreeMap<Layer, Vec<Vec<(i32, i32)>>>) -> Vec<Marker> {
+    let mut out = Vec::new();
+    for l in layers {
+        for p in polys.get(l).map_or(&[][..], Vec::as_slice) {
+            let n = p.len();
+            for i in 0..n {
+                let (a, b) = (p[i], p[(i + 1) % n]);
+                if a.0 != b.0 && a.1 != b.1 {
+                    let s = [a.0, a.1, b.0, b.1];
+                    out.push(Marker::Edges { a: s, b: s, value: 0 });
+                }
+            }
+        }
+    }
+    out
 }
 
 fn bbox_of(tiles: &[Rect]) -> Option<Rect> {
@@ -857,7 +1120,7 @@ pub fn write_rdb(results: &[RuleResult], top: &str, precision: u32) -> String {
                     k += 1;
                     s.push_str(&format!("e {k} 2\n{} {} {} {}\n{} {} {} {}\n", a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]));
                 }
-                Marker::Window { rect: b, .. } => {
+                Marker::Window { rect: b, .. } | Marker::Shape { rect: b, .. } => {
                     k += 1;
                     s.push_str(&format!("p {k} 4\n{} {}\n{} {}\n{} {}\n{} {}\n", b.x0, b.y0, b.x1, b.y0, b.x1, b.y1, b.x0, b.y1));
                 }
@@ -895,6 +1158,72 @@ mod tests {
 
     fn count(rules: &str, els: Vec<Element>) -> usize {
         run(rules, els)[0].1
+    }
+
+    /// Rule (width): interior width below d, side to side, over the merged shapes: two shapes
+    /// side by side make one wide polygon; at d it is clean; the union of two layers counts.
+    #[test]
+    fn width_is_interior_width_of_the_merged_shape() {
+        let r = "width W 1/1 32";
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 31)]), 1, "31 wide");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 32)]), 0, "32 wide");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 20), bx(1, 1, 0, 20, 100, 40)]), 0, "two halves merge");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 20), bx(1, 2, 0, 20, 100, 40)]), 1, "the other mask's half does not widen it");
+        assert_eq!(count("width W 1/1 1/2 32", vec![bx(1, 1, 0, 0, 100, 20), bx(1, 2, 0, 20, 100, 40)]), 0, "union");
+        // the gap between two shapes is not interior
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 40), bx(1, 1, 0, 50, 100, 90)]), 0);
+        // two stacked shapes, 30 and 40 wide, 10 apart: each is narrow, and the far edges (80
+        // apart, across the gap) are not a width
+        assert_eq!(count("width W 1/1 100", vec![bx(1, 1, 0, 0, 100, 30), bx(1, 1, 0, 40, 100, 80)]), 2);
+        // a narrow neck in a wide shape
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 100), bx(1, 1, 100, 40, 200, 60), bx(1, 1, 200, 0, 300, 100)]), 1);
+    }
+
+    /// Rule (area): polygon area below a, on the merged shapes; shape=rect / notrect keep only
+    /// rectangles / only other polygons.
+    #[test]
+    fn area_is_per_merged_polygon() {
+        assert_eq!(count("area A 1/1 1000", vec![bx(1, 1, 0, 0, 33, 30)]), 1, "990");
+        assert_eq!(count("area A 1/1 1000", vec![bx(1, 1, 0, 0, 50, 20)]), 0, "1000");
+        assert_eq!(count("area A 1/1 1000", vec![bx(1, 1, 0, 0, 20, 20), bx(1, 1, 20, 0, 40, 30)]), 0, "1000 as one L");
+        let l = vec![bx(1, 1, 0, 0, 20, 20), bx(1, 1, 20, 0, 40, 25)];
+        assert_eq!(count("area A 1/1 1000 shape=notrect", l.clone()), 1, "900, an L");
+        assert_eq!(count("area A 1/1 1000 shape=rect", l), 0, "an L is not a rectangle");
+        assert_eq!(count("area A 1/1 1000 shape=rect", vec![bx(1, 1, 0, 0, 30, 30)]), 1);
+        assert!(parse("area A 1/1 10 shape=round").is_err());
+    }
+
+    /// Rule (hole): an enclosed hole of area below a; the ring around it is not a hole.
+    #[test]
+    fn hole_is_an_enclosed_gap() {
+        let ring = |w: i32| vec![bx(1, 1, 0, 0, 100, 20), bx(1, 1, 0, 20 + w, 100, 40 + w), bx(1, 1, 0, 0, 20, 40 + w), bx(1, 1, 80, 0, 100, 40 + w)];
+        // inner hole 60 x w
+        assert_eq!(count("hole H 1/1 1000", ring(16)), 1, "960");
+        assert_eq!(count("hole H 1/1 1000", ring(17)), 0, "1020");
+        assert_eq!(count("hole H 1/1 1000", vec![bx(1, 1, 0, 0, 10, 10)]), 0, "no hole");
+    }
+
+    /// Rule (shortvertex): a vertex whose two edges are both shorter than d; a wire end (one
+    /// short edge between two long ones) is clean.
+    #[test]
+    fn short_vertex_needs_two_short_edges() {
+        let r = "shortvertex V 1/1 57";
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 1000, 32)]), 0, "wire end");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 56, 56)]), 4, "small square: every corner");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 57, 56)]), 0, "57 is not short");
+        // a jog: a 30-long step between two long wires makes two short-short vertices? no: each
+        // step vertex has one long edge
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 500, 32), bx(1, 1, 470, 0, 1000, 62)]), 0);
+    }
+
+    /// Rule (orthogonal): a drawn edge that is neither horizontal nor vertical.
+    #[test]
+    fn orthogonal_flags_a_diagonal_edge() {
+        let tri = Element::Boundary { layer: 1, datatype: 1, pts: vec![(0, 0), (100, 0), (0, 100), (0, 0)] };
+        assert_eq!(count("orthogonal O 1/1", vec![tri]), 1);
+        assert_eq!(count("orthogonal O 1/1", vec![bx(1, 1, 0, 0, 10, 10)]), 0);
+        assert!(parse("orthogonal O").is_err(), "needs a layer");
+        assert!(parse("width W 1/1").is_err(), "needs a value");
     }
 
     /// Rule (space): two shapes of one mask closer than d, side to side or corner to corner, are
