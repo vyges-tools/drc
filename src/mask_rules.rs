@@ -74,6 +74,12 @@
 //!   longer than `r` is one result (each side of the gap counts on its own).
 //! - `notch L... len side w`: a notch bottom (both corners concave) shorter than `len`, beside a
 //!   notch side shorter than `side`, with less than `w` of metal behind it (inside, side to side).
+//! - `joint L... w len eol adj d`: joints, convex vertices where both edges
+//!   have a narrow portion (an inside edge facing it, side to side, no more than `w` away) that
+//!   reaches the vertex and is no longer than `len`, and neither edge is a line end (no longer
+//!   than `eol`, convex at both ends, both neighbours at least `adj`). A result is two joint
+//!   edges closer than `d` corner to corner (neither projects onto the other; Euclidean, facing
+//!   each other's outside), or two joint vertices that touch at a point (value 0).
 //! - `rectangle L...`: a merged polygon (of the union) that is not a rectangle.
 //! - `size L... w h`: a merged polygon that is not a `w` by `h` rectangle, either way round.
 //! - `notchecked` states a rule the file knows of and this engine does not check, so the report
@@ -143,6 +149,10 @@ pub enum Kind {
     /// `jog`: the measured pieces are summed per cluster (one line, or lines joined by a step no
     /// longer than `jog`), and a cluster longer than `run` is one result.
     WideSpace { layers: Vec<Layer>, w: i64, d: i64, to: Option<i64>, run: i64, bridge: Bridge, jog: Option<i64> },
+    /// Joint edges (a convex vertex whose two edges have a narrow portion, no more than `w` across
+    /// and no longer than `len`, reaching it, neither edge a line end of `eol`/`adj`) closer than
+    /// `d` corner to corner, or joint vertices touching at a point.
+    Joint { layers: Vec<Layer>, w: i64, len: i64, eol: i64, adj: i64, d: i64 },
     NotChecked { why: String },
 }
 
@@ -179,6 +189,7 @@ impl MaskRule {
             Kind::Rectangle { .. } => "rectangle",
             Kind::Size { .. } => "size",
             Kind::WideSpace { .. } => "widespace",
+            Kind::Joint { .. } => "joint",
             Kind::NotChecked { .. } => "notchecked",
         }
     }
@@ -362,6 +373,14 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
                     return Err(err("widespace widths must be positive"));
                 }
                 Kind::WideSpace { layers, w, d, to, run: opt("run")?.unwrap_or(0), bridge, jog: opt("jog")? }
+            }
+"joint" => {
+                if pos.len() < 6 {
+                    return Err(err("wrong number of arguments"));
+                }
+                let n = pos.len();
+                let layers: Vec<Layer> = pos[..n - 5].iter().map(|s| Layer::parse(s).ok_or_else(|| err("expected a layer"))).collect::<Result<_, _>>()?;
+                Kind::Joint { layers, w: num(n - 5)?, len: num(n - 4)?, eol: num(n - 3)?, adj: num(n - 2)?, d: num(n - 1)? }
             }
             "width" | "area" | "hole" | "shortvertex" | "orthogonal" | "rectangle" | "size" => {
                 // layers (their union), then the value; `orthogonal` and `rectangle` take none, `size` two
@@ -1060,7 +1079,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 want.extend(num.iter().chain(den).chain(exempt).copied());
                 want.extend(inside.iter().copied());
             }
-            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Notch { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::WideSpace { layers, .. } => {
+            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Notch { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::WideSpace { layers, .. } | Kind::Joint { layers, .. } => {
                 want.extend(layers.iter().copied());
             }
             Kind::NotChecked { .. } => {}
@@ -1133,7 +1152,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured, range_ppm });
                 continue;
             }
-            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Notch { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::WideSpace { layers, .. } => {
+            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Notch { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::WideSpace { layers, .. } | Kind::Joint { layers, .. } => {
                 let m: &Merged = if layers.len() > 1 {
                     unions.entry(layers.clone()).or_insert_with(|| {
                         let v: Vec<Vec<(i32, i32)>> = layers.iter().flat_map(|l| polys.get(l).cloned().unwrap_or_default()).collect();
@@ -1248,6 +1267,7 @@ fn shape_rule(kind: &Kind, m: &Merged, layers: &[Layer], polys: &BTreeMap<Layer,
         Kind::Orthogonal { .. } => (0, off_axis(layers, polys)),
         Kind::Rectangle { .. } => (0, not_sized(m, None)),
         Kind::Size { w, h, .. } => (*w, not_sized(m, Some((*w, *h)))),
+        Kind::Joint { w, len, eol, adj, d, .. } => (*d, joint_space(m, *w, *len, *eol, *adj, *d)),
         Kind::WideSpace { w, d, to, run, bridge, jog, .. } => {
             let a = wide_part(m, *w);
             let other;
@@ -1443,6 +1463,159 @@ fn thin_notches(m: &Merged, len: i64, side: i64, w: i64) -> Vec<Marker> {
                 out.push(Marker::Shape { rect: bbox_edge(e), value: g });
             }
         }
+    }
+    out
+}
+
+/// Joint space. A joint is a convex vertex whose two edges each carry a narrow portion reaching
+/// it: the part of the edge with an inside edge facing it, side to side, no more than `w` away
+/// (the portions of one edge merged), no longer than `len`; neither edge may be a line end (no
+/// longer than `eol`, convex at both ends, both neighbours at least `adj` long). The edges of
+/// joints are measured to each other corner to corner only (neither projects onto the other, each
+/// faces the other's outside), Euclidean, closer than `d`; edges that meet are not measured. Two
+/// joint vertices at one place (polygons touching at a point) are a result of 0.
+fn joint_space(m: &Merged, w: i64, len: i64, eol: i64, adj: i64, d: i64) -> Vec<Marker> {
+    let cross = |e: &Edge, f: &Edge| -> i64 {
+        let (ux, uy) = (i64::from(e.b.0 - e.a.0), i64::from(e.b.1 - e.a.1));
+        let (vx, vy) = (i64::from(f.b.0 - f.a.0), i64::from(f.b.1 - f.a.1));
+        ux * vy - uy * vx
+    };
+    // the coordinate range of an edge along an axis
+    let span = |e: &Edge, ax: Axis| if ax == Axis::Horizontal { (e.a.0.min(e.b.0), e.a.0.max(e.b.0)) } else { (e.a.1.min(e.b.1), e.a.1.max(e.b.1)) };
+    let along = |p: (i32, i32), ax: Axis| if ax == Axis::Horizontal { p.0 } else { p.1 };
+    let all = m.edges();
+    let boxes: Vec<Rect> = all.iter().map(bbox_edge).collect();
+    let idx = RegionIndex::build(&boxes);
+    // the merged narrow portions of an edge, along its axis
+    let narrow_parts = |e: &Edge| -> Vec<(i32, i32)> {
+        let oe = outward_edge(e);
+        let (lo, hi) = span(e, e.axis());
+        let mut iv: Vec<(i32, i32)> = idx
+            .within(&bbox_edge(e), w as i32 + 1, None)
+            .into_iter()
+            .map(|j| &all[j as usize])
+            .filter_map(|f| {
+                if f.axis() != e.axis() || !projecting_edges(e, f) {
+                    return None;
+                }
+                let (re, rf) = (bbox_edge(e), bbox_edge(f));
+                let (dx, dy) = if e.axis() == Axis::Horizontal { (0, i64::from(rf.y0 - re.y0)) } else { (i64::from(rf.x0 - re.x0), 0) };
+                let gap = dx.abs() + dy.abs();
+                let of = outward_edge(f);
+                let inside = gap > 0 && gap <= w && oe.0 * dx + oe.1 * dy < 0 && of.0 * dx + of.1 * dy > 0;
+                let (flo, fhi) = span(f, e.axis());
+                inside.then_some((lo.max(flo), hi.min(fhi)))
+            })
+            .collect();
+        iv.sort_unstable();
+        let mut out: Vec<(i32, i32)> = Vec::new();
+        for (a, b) in iv {
+            match out.last_mut() {
+                Some(l) if a <= l.1 => l.1 = l.1.max(b),
+                _ => out.push((a, b)),
+            }
+        }
+        out
+    };
+    // a narrow portion of an edge ends at coordinate `c` and is no longer than `len`
+    let short_at = |parts: &[(i32, i32)], c: i32| parts.iter().any(|&(a, b)| (a == c || b == c) && i64::from(b - a) <= len);
+    let mut joint_edges: Vec<Edge> = Vec::new();
+    let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
+    // joint vertices: the point, the vertex (ring, index of the edge leaving it)
+    let mut joints: Vec<((i32, i32), (usize, usize))> = Vec::new();
+    // polygons that touch at a point are separate polygons, however the ring was traced
+    let rings: Vec<Vec<Edge>> = m.rings.iter().flat_map(|r| split_pinches(r)).collect();
+    for (r, ring) in rings.iter().enumerate() {
+        let n = ring.len();
+        if n < 4 {
+            continue;
+        }
+        let is_end = |k: usize| {
+            let (p, e, q) = (&ring[(k + n - 1) % n], &ring[k], &ring[(k + 1) % n]);
+            e.len() <= eol && p.len() >= adj && q.len() >= adj && cross(p, e) > 0 && cross(e, q) > 0
+        };
+        let parts: Vec<Vec<(i32, i32)>> = ring.iter().map(narrow_parts).collect();
+        for i in 0..n {
+            let k = (i + 1) % n;
+            let (e, q) = (&ring[i], &ring[k]);
+            if cross(e, q) <= 0 || is_end(i) || is_end(k) {
+                continue;
+            }
+            let v = e.b;
+            if !short_at(&parts[i], along(v, e.axis())) || !short_at(&parts[k], along(v, q.axis())) {
+                continue;
+            }
+            for (j, f) in [(i, e), (k, q)] {
+                if seen.insert((r, j)) {
+                    joint_edges.push(*f);
+                }
+            }
+            joints.push((v, (r, k)));
+        }
+    }
+    let mut out = Vec::new();
+    let mut done: BTreeSet<((i32, i32), (i32, i32))> = BTreeSet::new();
+    // outward offset of a point from an edge's line
+    let off = |e: &Edge, p: (i32, i32)| {
+        let (ox, oy) = outward_edge(e);
+        ox * i64::from(p.0 - e.a.0) + oy * i64::from(p.1 - e.a.1)
+    };
+    let jb: Vec<Rect> = joint_edges.iter().map(bbox_edge).collect();
+    let jidx = RegionIndex::build(&jb);
+    for (i, e) in joint_edges.iter().enumerate() {
+        for j in jidx.within(&jb[i], d as i32 + 1, None) {
+            let f = &joint_edges[j as usize];
+            if j as usize == i || off(e, f.a).max(off(e, f.b)) <= 0 || off(f, e.a).max(off(f, e.b)) <= 0 {
+                continue;
+            }
+            let ((elo, ehi), (flo, fhi)) = (span(e, e.axis()), span(f, e.axis()));
+            let ((elo2, ehi2), (flo2, fhi2)) = (span(e, f.axis()), span(f, f.axis()));
+            if !(fhi <= elo || flo >= ehi) || !(ehi2 <= flo2 || elo2 >= fhi2) {
+                continue;
+            }
+            let (p, q, d2) = [e.a, e.b]
+                .iter()
+                .flat_map(|&p| [f.a, f.b].map(move |q| (p, q, i64::from(p.0 - q.0).pow(2) + i64::from(p.1 - q.1).pow(2))))
+                .min_by_key(|t| t.2)
+                .expect("two endpoints each");
+            if d2 == 0 || d2 >= d * d || !done.insert((p.min(q), p.max(q))) {
+                continue;
+            }
+            out.push(Marker::Edges { a: seg(e), b: seg(f), value: (d2 as f64).sqrt() as i64 });
+        }
+    }
+    // joint vertices touching at a point
+    let mut at: BTreeMap<(i32, i32), BTreeSet<(usize, usize)>> = BTreeMap::new();
+    for (p, vid) in joints {
+        at.entry(p).or_default().insert(vid);
+    }
+    for (p, vids) in at {
+        if vids.len() > 1 {
+            out.push(Marker::Shape { rect: Rect { x0: p.0, y0: p.1, x1: p.0, y1: p.1 }, value: 0 });
+        }
+    }
+    out
+}
+
+/// A ring that passes through one point twice (two polygons touching at a corner, traced as one)
+/// split into its loops.
+fn split_pinches(ring: &[Edge]) -> Vec<Vec<Edge>> {
+    let mut out = Vec::new();
+    let mut stack: Vec<Edge> = Vec::new();
+    let mut pos: BTreeMap<(i32, i32), usize> = BTreeMap::new();
+    for e in ring {
+        if let Some(&p) = pos.get(&e.a) {
+            let lp: Vec<Edge> = stack.drain(p..).collect();
+            for x in &lp {
+                pos.remove(&x.a);
+            }
+            out.push(lp);
+        }
+        pos.insert(e.a, stack.len());
+        stack.push(*e);
+    }
+    if !stack.is_empty() {
+        out.push(stack);
     }
     out
 }
@@ -1898,6 +2071,66 @@ mod tests {
 
     /// Rule (notch): a short notch bottom with thin metal behind it. The notch is cut into a bar
     /// from above; the bar under the notch is the metal behind.
+    #[test]
+    fn a_joint_is_a_short_narrow_outer_corner() {
+        // a two-step stair: (0,0) and (45,45) are outer corners whose edges are short, and narrow
+        // there (30 of metal opposite) and not line ends (one neighbour is a 15 step)
+        let stair = |x: i32, y: i32| vec![bx(1, 1, x, y, x + 30, y + 30), bx(1, 1, x + 15, y + 15, x + 45, y + 45)];
+        let two = |dx: i32| [stair(0, 0), stair(dx, dx)].concat();
+        let r = |w: i64, len: i64, adj: i64, d: i64| format!("joint J 1/1 {w} {len} 62 {adj} {d}");
+        // corner (45,45) to corner (78,78): 46.7
+        assert_eq!(count(&r(37, 45, 25, 47), two(78)), 1, "46.7 is closer than 47");
+        assert_eq!(count(&r(37, 45, 25, 46), two(78)), 0, "46.7 is not closer than 46");
+        // corner (45,45) to corner (72,81): exactly 45
+        let off = [stair(0, 0), stair(72, 81)].concat();
+        assert_eq!(count(&r(37, 45, 25, 45), off.clone()), 0, "45 is not closer than 45");
+        assert_eq!(count(&r(37, 45, 25, 46), off), 1, "45 is closer than 46");
+        assert_eq!(count(&r(29, 45, 25, 47), two(78)), 0, "30 across is not within 29: no joint");
+        assert_eq!(count(&r(30, 45, 25, 47), two(78)), 1, "30 across is within 30");
+        assert_eq!(count(&r(37, 14, 25, 47), two(78)), 0, "the narrow portions are 15, longer than 14");
+        assert_eq!(count(&r(37, 15, 25, 47), two(78)), 1, "15 is no longer than 15");
+        // within 53 the corner edges are narrow twice (30 and 45 across); the two portions merge
+        // into one of 30, longer than 23
+        assert_eq!(count(&r(53, 23, 25, 47), two(78)), 0, "one merged portion of 30");
+        assert_eq!(count(&r(37, 45, 15, 47), two(78)), 0, "with steps of 15 counted, the corner edges are line ends");
+        // plain wide rectangles, corner to corner at the same place: their edges are long
+        let blocks = vec![bx(1, 1, 0, 0, 45, 45), bx(1, 1, 78, 78, 123, 123)];
+        assert_eq!(count(&r(37, 45, 25, 47), blocks), 0, "no joints on long edges");
+        // side by side, the joints project onto each other: not corner to corner
+        let beside = [stair(0, 0), stair(0, 75)].concat();
+        assert_eq!(count(&r(37, 45, 25, 210), beside), 0, "the facing joint edges project onto each other");
+        // touching at the joint vertex: a point contact, not a distance
+        let touch = two(45);
+        assert_eq!(count(&r(37, 45, 25, 47), touch.clone()), 1, "joints touching at a point");
+        assert_eq!(count(&r(37, 45, 25, 47), [touch, vec![bx(1, 1, 200, 0, 245, 45)]].concat()), 1, "a block far away adds nothing");
+        // a stair whose lower edge is 15 long and narrow all along: (0,15) is a joint too, and a
+        // mirrored stair's joint vertex touches it there
+        let mut far = vec![bx(1, 1, 0, 0, 30, 15), bx(1, 1, 15, 15, 45, 45)];
+        far.extend([bx(1, 1, -30, 15, 0, 45), bx(1, 1, -45, 30, -15, 60)]);
+        assert_eq!(count(&r(37, 45, 25, 47), far), 1, "joint vertices touching on one line");
+        assert!(parse("joint J 1/1 37 45 62 25").is_err(), "five values");
+        assert!(parse("joint J 1/1 37 45 62 25 47 singular=vertex").is_err(), "no options");
+    }
+
+    #[test]
+    fn a_ring_through_a_pinch_is_two_loops() {
+        // two squares touching at (10,10), traced as one ring through it
+        let pts = [(10, 10), (0, 10), (0, 0), (10, 0), (10, 10), (20, 10), (20, 20), (10, 20)];
+        let ring: Vec<Edge> = (0..pts.len()).map(|i| Edge { a: pts[i], b: pts[(i + 1) % pts.len()] }).collect();
+        let loops = split_pinches(&ring);
+        assert_eq!(loops.len(), 2);
+        assert!(loops.iter().all(|l| l.len() == 4 && l[0].a == l[3].b), "{loops:?}");
+        assert_eq!(split_pinches(&ring[..4]).len(), 1, "a plain ring stays one");
+        // two stairs touching at their joint vertices (45,45), traced as one ring through it:
+        // the joints are still found
+        let s = [(0, 0), (30, 0), (30, 15), (45, 15), (45, 45), (75, 45), (75, 60), (90, 60), (90, 90), (60, 90), (60, 75), (45, 75), (45, 45), (15, 45), (15, 30), (0, 30)];
+        let ring: Vec<Edge> = (0..s.len()).map(|i| Edge { a: s[i], b: s[(i + 1) % s.len()] }).collect();
+        let tiles = [Rect { x0: 0, y0: 0, x1: 30, y1: 30 }, Rect { x0: 15, y0: 15, x1: 45, y1: 45 }, Rect { x0: 45, y0: 45, x1: 75, y1: 75 }, Rect { x0: 60, y0: 60, x1: 90, y1: 90 }];
+        let mut m = Merged::from_tiles(&tiles);
+        m.rings = vec![ring];
+        assert_eq!(joint_space(&m, 37, 45, 62, 25, 47).len(), 1, "the touching joint vertices");
+    }
+
     #[test]
     fn a_short_notch_over_thin_metal() {
         // a bar 0..400 x 0..100 with a notch 180..220 cut from the top down to y=40: 40 of metal
