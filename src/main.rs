@@ -522,8 +522,8 @@ fn mask_check(args: &[String], json: bool, fail_on: bool) {
             .iter()
             .map(|r| {
                 format!(
-                    "    {{\"rule\": {}, \"kind\": {}, \"checked\": {}, \"limit\": {}, \"count\": {}, \"not_checked_because\": {}}}",
-                    q(&r.name), q(r.kind), r.checked, r.limit, r.markers.len(),
+                    "    {{\"rule\": {}, \"kind\": {}, \"checked\": {}, \"limit\": {}, \"count\": {}, \"measured\": {}, \"not_checked_because\": {}}}",
+                    q(&r.name), q(r.kind), r.checked, r.limit, r.markers.len(), r.measured,
                     r.why_not.as_deref().map_or("null".to_string(), q)
                 )
             })
