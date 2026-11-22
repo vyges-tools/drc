@@ -42,6 +42,7 @@ vyges-drc check block.gds --rules sky130.drc --top block --json
 vyges-drc check block.gds --rules sky130.drc --fail-on-violation   # exit 3 (CI gate)
 vyges-drc fill  block.gds --rules sky130.drc -o filled.gds         # metal-fill generator
 vyges-drc demo                                          # built-in layout with violations
+vyges-drc mask-check block.gds --rules mp.mprules --rdb block.rdb   # named multi-patterning rules
 # input may be GDSII (.gds) or OASIS (.oas/.oasis); flags: --rules DECK · --top CELL
 #        · -o FILE · --json · --fail-on-violation · -h · -V
 ```
@@ -72,6 +73,13 @@ c2c        19     80              # corner-to-corner spacing on layer 19 must be
 runlen     20     129 140         # parallel run at ≤129-dbu spacing must be ≥140 dbu long
 fill       70     30 100000 600 400   # top layer 70 to 30% per window (600-fill, 400-gap)
 ```
+
+**Multi-patterning sign-off (`mask-check`).** On a double-patterned layer each mask is its own
+layer/datatype. A `.mprules` file names each rule as the foundry's deck names it and states its kind:
+`space` (one mask), `space2` (mask to mask), `eol` (line-end windows, to the same mask, the other mask
+or another line end), `oddcycle` (shapes no two-colouring can separate) and `notchecked` (stated, so
+the report never reads silence as clean); `exclude=` / `only=` select a marker region. The results go
+to JSON and to an ASCII results database, one check per rule name.
 
 The `fill` rule drives the **`fill` generator** (`vyges-drc fill … -o out.gds`), not
 the checker — the checker ignores it.

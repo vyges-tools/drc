@@ -26,6 +26,7 @@ pub use vyges_layout as layout;
 
 pub mod cluster;
 pub mod drc;
+pub mod mask_rules;
 pub mod rules;
 pub mod views;
 
