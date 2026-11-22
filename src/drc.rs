@@ -76,7 +76,7 @@ pub fn spacing(a: &Rect, b: &Rect) -> Option<i64> {
 }
 
 /// Resolve the top cell to operate on (the only cell, or the named one).
-fn pick_top(lib: &Library, top: Option<&str>) -> Result<String, String> {
+pub(crate) fn pick_top(lib: &Library, top: Option<&str>) -> Result<String, String> {
     match top {
         Some(t) => Ok(t.to_string()),
         None if lib.cells.len() == 1 => Ok(lib.cells[0].name.clone()),
@@ -132,7 +132,7 @@ fn is_manhattan(pts: &[(i32, i32)]) -> bool {
 /// preserved), or the bounding box only for a genuinely non-Manhattan shape. Unlike
 /// `elem_rect`, a rectilinear L/notched polygon is kept whole rather than collapsed to its
 /// bbox, so unioning these gives the real merged geometry (enclosure needs this).
-fn elem_poly(e: &Element) -> (Layer, Option<Vec<(i32, i32)>>) {
+pub(crate) fn elem_poly(e: &Element) -> (Layer, Option<Vec<(i32, i32)>>) {
     let (num, dt, pts) = match e {
         Element::Boundary {
             layer,
@@ -453,7 +453,7 @@ fn sep_violations(rule: &crate::rules::Sep, edges: &[Edge], out: &mut Vec<Violat
     }
 }
 
-fn bbox_edge(e: &Edge) -> Rect {
+pub(crate) fn bbox_edge(e: &Edge) -> Rect {
     Rect {
         x0: e.a.0.min(e.b.0),
         y0: e.a.1.min(e.b.1),
@@ -463,7 +463,7 @@ fn bbox_edge(e: &Edge) -> Rect {
 }
 
 /// Outward normal of a directed edge (right of travel; solid on the left).
-fn outward_edge(e: &Edge) -> (i64, i64) {
+pub(crate) fn outward_edge(e: &Edge) -> (i64, i64) {
     (
         (e.b.1 - e.a.1).signum() as i64,
         -((e.b.0 - e.a.0).signum() as i64),
@@ -471,7 +471,7 @@ fn outward_edge(e: &Edge) -> (i64, i64) {
 }
 
 /// Strict projection overlap of two parallel axis-aligned edges (side-to-side, not corner).
-fn projecting_edges(a: &Edge, b: &Edge) -> bool {
+pub(crate) fn projecting_edges(a: &Edge, b: &Edge) -> bool {
     if a.axis() == Axis::Horizontal {
         let (x1a, x1b) = (a.a.0.min(a.b.0), a.a.0.max(a.b.0));
         let (x2a, x2b) = (b.a.0.min(b.b.0), b.a.0.max(b.b.0));
@@ -484,7 +484,7 @@ fn projecting_edges(a: &Edge, b: &Edge) -> bool {
 }
 
 /// The two closest points (on a, on b) between two axis-aligned segments.
-fn closest_pts(a: &Edge, b: &Edge) -> ((i32, i32), (i32, i32)) {
+pub(crate) fn closest_pts(a: &Edge, b: &Edge) -> ((i32, i32), (i32, i32)) {
     let clamp = |p: (i32, i32), s: &Edge| {
         let (x0, y0) = (s.a.0.min(s.b.0), s.a.1.min(s.b.1));
         let (x1, y1) = (s.a.0.max(s.b.0), s.a.1.max(s.b.1));
@@ -503,7 +503,7 @@ fn closest_pts(a: &Edge, b: &Edge) -> ((i32, i32), (i32, i32)) {
     *cands.iter().min_by_key(|(p, q)| dsq(*p, *q)).unwrap()
 }
 
-fn point_in_region(p: (i32, i32), tiles: &[Rect], idx: &RegionIndex) -> bool {
+pub(crate) fn point_in_region(p: (i32, i32), tiles: &[Rect], idx: &RegionIndex) -> bool {
     let q = Rect {
         x0: p.0,
         y0: p.1,

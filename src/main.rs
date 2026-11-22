@@ -42,6 +42,9 @@ usage:
   vyges loom drc check GDS --rules DECK [--top CELL] [-o OUT] [--json] [--fail-on-violation]
   vyges loom drc fill  GDS --rules DECK [--top CELL] -o OUT.gds     # metal-fill generator
   vyges loom drc demo  [--json]
+  vyges loom drc mask-check GDS --rules FILE.mprules [--top CELL] [--rdb OUT.rdb] [-o OUT] [--json] [--fail-on-violation]
+                        # named multi-patterning rules (same-mask, mask-to-mask, line end,
+                        # odd cycle) from a rule file; --rdb writes the ASCII results database
 
 The input layout may be GDSII (.gds) or OASIS (.oas/.oasis) — picked by extension.
 
@@ -458,6 +461,99 @@ fn with_report_path(json: &str, path: Option<&str>) -> String {
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// `mask-check`: the named rules of a `.mprules` file over a layout. Exit 0 clean, 3 with
+/// results and `--fail-on-violation`, 1 on unreadable input, 2 on bad usage.
+fn mask_check(args: &[String], json: bool, fail_on: bool) {
+    use vyges_drc::mask_rules;
+    let Some(gds) = args.get(1).filter(|a| !a.starts_with('-')) else {
+        diag!("error: `mask-check` needs a GDS path\n{USAGE}");
+        exit(2);
+    };
+    let Some(file) = opt(args, "--rules") else {
+        diag!("error: `mask-check` needs --rules FILE.mprules\n{USAGE}");
+        exit(2);
+    };
+    let lib = Library::load_any(gds).unwrap_or_else(|e| {
+        diag!("error: {gds}: {e}");
+        exit(1);
+    });
+    let text = std::fs::read_to_string(&file).unwrap_or_else(|e| {
+        diag!("error: {file}: {e}");
+        exit(1);
+    });
+    let rules = mask_rules::parse(&text).unwrap_or_else(|e| {
+        diag!("error: {file}: {e}");
+        exit(1);
+    });
+    let top = opt(args, "--top");
+    let res = mask_rules::check(&lib, top.as_deref(), &rules).unwrap_or_else(|e| {
+        diag!("error: {e}");
+        exit(1);
+    });
+    let top_name = top.unwrap_or_else(|| lib.cells.last().map(|c| c.name.clone()).unwrap_or_default());
+    // DB units per micron, the results database's precision
+    let precision = (1e-6 / lib.db_unit).round() as u32;
+    if let Some(p) = opt(args, "--rdb") {
+        std::fs::write(&p, mask_rules::write_rdb(&res, &top_name, precision)).unwrap_or_else(|e| {
+            diag!("error: {p}: {e}");
+            exit(1);
+        });
+    }
+    let found: usize = res.iter().map(|r| r.markers.len()).sum();
+    let checked = res.iter().filter(|r| r.checked).count();
+    // 🔑 a pass word never comes from a run that did nothing: no checked rule is its own status
+    let status = if checked == 0 { "nothing_checked" } else if found == 0 { "clean" } else { "results" };
+    let text = if json {
+        // std-only crate: JSON by hand; rule names and reasons are escaped
+        let q = |s: &str| -> String {
+            let mut o = String::from("\"");
+            for c in s.chars() {
+                match c {
+                    '"' => o.push_str("\\\""),
+                    '\\' => o.push_str("\\\\"),
+                    c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+                    c => o.push(c),
+                }
+            }
+            o.push('"');
+            o
+        };
+        let rows: Vec<String> = res
+            .iter()
+            .map(|r| {
+                format!(
+                    "    {{\"rule\": {}, \"kind\": {}, \"checked\": {}, \"limit\": {}, \"count\": {}, \"not_checked_because\": {}}}",
+                    q(&r.name), q(r.kind), r.checked, r.limit, r.markers.len(),
+                    r.why_not.as_deref().map_or("null".to_string(), q)
+                )
+            })
+            .collect();
+        format!(
+            "{{\n  \"tool\": \"vyges-drc\", \"command\": \"mask-check\", \"status\": {}, \"top\": {}, \"precision\": {precision},\n  \"rules_checked\": {checked}, \"rules_not_checked\": {}, \"results\": {found},\n  \"rules\": [\n{}\n  ]\n}}\n",
+            q(status), q(&top_name), res.len() - checked, rows.join(",\n")
+        )
+    } else {
+        let mut t = format!("vyges-drc mask-check — {status}: {found} result(s), {checked} rule(s) checked, {} not checked\n", res.len() - checked);
+        for r in &res {
+            match &r.why_not {
+                Some(w) => t.push_str(&format!("  {:<40} not checked: {w}\n", r.name)),
+                None => t.push_str(&format!("  {:<40} {:>6}  ({} < {})\n", r.name, r.markers.len(), r.kind, r.limit)),
+            }
+        }
+        t
+    };
+    match opt(args, "-o") {
+        Some(p) => std::fs::write(&p, &text).unwrap_or_else(|e| {
+            diag!("error: {p}: {e}");
+            exit(1);
+        }),
+        None => print!("{text}"),
+    }
+    if fail_on && found > 0 {
+        exit(3);
+    }
+}
+
 pub fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") || args.is_empty() {
@@ -475,6 +571,10 @@ pub fn main() {
     let json = args.iter().any(|a| a == "--json");
     let fail_on = args.iter().any(|a| a == "--fail-on-violation");
 
+    if args[0] == "mask-check" {
+        mask_check(&args, json, fail_on);
+        return;
+    }
     // `fill` is a generator (GDS in -> filled GDS out), not a report — handle early.
     if args[0] == "fill" {
         let Some(gds) = args.get(1).filter(|a| !a.starts_with('-')) else {
