@@ -12,6 +12,7 @@
 //! space2      R.S.2         20/1 20/2 32
 //! eol         R.S.4_A       20/1 70 eolmax=80 adjmin=20 ext=16       [lenlt=N | lenge=N] [to=L | toeol] [exclude=L | only=L]
 //! oddcycle    R.colour      20/1 20/2 66
+//! stitch      R.stitch      20/1 20/2
 //! notchecked  R.C.10_A      why it is not checked, free text
 //! ```
 //!
@@ -31,6 +32,8 @@
 //! - `oddcycle A B d`: the shapes of A and B (each polygon a node; a polygon of A overlapping
 //!   one of B is a stitch, not a constraint) joined wherever two are closer than `d`; an odd
 //!   cycle cannot be two-coloured by any assignment. Each odd cycle found is one result.
+//! - `stitch A B`: every place the two masks meet (overlap or abut). A stitch is legal only
+//!   under the deck's stitch rules; this lists each one so none passes unseen.
 //! - `exclude=L` drops a result whose shapes both lie in layer L (touch it); `only=L` keeps only
 //!   those. A region marker, read by interaction.
 //! - `notchecked` states a rule the file knows of and this engine does not check, so the report
@@ -73,6 +76,7 @@ pub enum Kind {
     Space2 { a: Layer, b: Layer, d: i64 },
     Eol { layer: Layer, d: i64, eol_max: i64, adj_min: i64, ext: i64, len_lt: Option<i64>, len_ge: Option<i64>, to: EolTarget },
     OddCycle { a: Layer, b: Layer, d: i64 },
+    Stitch { a: Layer, b: Layer },
     NotChecked { why: String },
 }
 
@@ -90,6 +94,7 @@ impl MaskRule {
             Kind::Space2 { .. } => "space2",
             Kind::Eol { .. } => "eol",
             Kind::OddCycle { .. } => "oddcycle",
+            Kind::Stitch { .. } => "stitch",
             Kind::NotChecked { .. } => "notchecked",
         }
     }
@@ -185,6 +190,10 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
             "oddcycle" => {
                 want(3)?;
                 Kind::OddCycle { a: layer(0)?, b: layer(1)?, d: num(2)? }
+            }
+            "stitch" => {
+                want(2)?;
+                Kind::Stitch { a: layer(0)?, b: layer(1)? }
             }
             "eol" => {
                 want(2)?;
@@ -504,6 +513,50 @@ fn odd_cycles(ma: &Merged, mb: &Merged, d: i64) -> Vec<Marker> {
     out
 }
 
+/// Where the two masks meet: each connected piece of A AND B (an overlap), and each abutment
+/// of an A edge on a B edge (a zero-width meeting), as one polygon result.
+fn stitches(ma: &Merged, mb: &Merged) -> Vec<Marker> {
+    let mut boxes: Vec<Rect> = Vec::new();
+    for t in &ma.tiles {
+        for j in mb.idx.within(t, 1, None) {
+            let u = &mb.tiles[j as usize];
+            let r = Rect { x0: t.x0.max(u.x0), y0: t.y0.max(u.y0), x1: t.x1.min(u.x1), y1: t.y1.min(u.y1) };
+            // overlap, or a shared edge of positive length
+            if r.x0 <= r.x1 && r.y0 <= r.y1 && (r.x0 < r.x1 || r.y0 < r.y1) {
+                boxes.push(r);
+            }
+        }
+    }
+    // pieces that touch are one meeting
+    boxes.sort_by_key(|b| (b.x0, b.y0, b.x1, b.y1));
+    boxes.dedup();
+    let mut p: Vec<usize> = (0..boxes.len()).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let idx = RegionIndex::build(&boxes.iter().map(|b| b.inflate(1)).collect::<Vec<_>>());
+    for (i, b) in boxes.iter().enumerate() {
+        for j in idx.overlaps(&b.inflate(1)) {
+            let c = &boxes[j as usize];
+            if b.x0 <= c.x1 && c.x0 <= b.x1 && b.y0 <= c.y1 && c.y0 <= b.y1 {
+                let (x, y) = (find(&mut p, i), find(&mut p, j as usize));
+                p[x.max(y)] = x.min(y);
+            }
+        }
+    }
+    let mut groups: BTreeMap<usize, Rect> = BTreeMap::new();
+    for (i, b) in boxes.iter().enumerate() {
+        let r = find(&mut p, i);
+        let g = groups.entry(r).or_insert(*b);
+        *g = Rect { x0: g.x0.min(b.x0), y0: g.y0.min(b.y0), x1: g.x1.max(b.x1), y1: g.y1.max(b.y1) };
+    }
+    groups.into_values().map(|b| Marker::Cycle { boxes: vec![b] }).collect()
+}
+
 /// Run the rule file over the flattened top cell.
 pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec<RuleResult>, String> {
     let top = pick_top(lib, top)?;
@@ -514,7 +567,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
             Kind::Space { layer, .. } => {
                 want.insert(*layer);
             }
-            Kind::Space2 { a, b, .. } | Kind::OddCycle { a, b, .. } => {
+            Kind::Space2 { a, b, .. } | Kind::OddCycle { a, b, .. } | Kind::Stitch { a, b } => {
                 want.insert(*a);
                 want.insert(*b);
             }
@@ -555,6 +608,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 (*d, ext_pairs(&ma.edges(), &mb.edges(), *d, ma, mb))
             }
             Kind::OddCycle { a, b, d } => (*d, odd_cycles(&merged[a], &merged[b], *d)),
+            Kind::Stitch { a, b } => (0, stitches(&merged[a], &merged[b])),
             Kind::Eol { layer, d, eol_max, adj_min, ext, len_lt, len_ge, to } => {
                 let m = &merged[layer];
                 let ends: Vec<Edge> = line_ends(m, *eol_max, *adj_min)
@@ -569,6 +623,12 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                             _ => m,
                         };
                         for e in &ends {
+                            // a target that covers or abuts the end itself is the two masks meeting
+                            // (a stitch), not a spacing: external spacing measures across space
+                            // only, and the `stitch` kind reports the meeting
+                            if matches!(to, EolTarget::Layer(_)) && t.touches(&bbox_edge(e)) {
+                                continue;
+                            }
                             if let Some(hit) = t.overlaps_open(&eol_window(e, *d, *ext)) {
                                 let near = hit.iter().min_by_key(|h| (eol_gap(e, h), h.x0, h.y0)).expect("hit");
                                 found.push(Marker::Edges { a: seg(e), b: [near.x0, near.y0, near.x1, near.y1], value: eol_gap(e, near) });
@@ -731,7 +791,9 @@ mod tests {
         assert_eq!(count("eol E 1/1 70 eolmax=40 adjmin=20 ext=16 lenlt=30", vec![wire.clone(), bx(1, 1, -200, 369, 200, 400)]), 0);
         // to another layer
         assert_eq!(count("eol E 1/1 70 eolmax=40 ext=16 to=1/2", vec![wire.clone(), bx(1, 2, -200, 369, 200, 400)]), 1);
-        assert_eq!(count("eol E 1/1 70 eolmax=40 ext=16 to=1/2", vec![wire, bx(1, 1, -200, 369, 200, 400)]), 0);
+        assert_eq!(count("eol E 1/1 70 eolmax=40 ext=16 to=1/2", vec![wire.clone(), bx(1, 1, -200, 369, 200, 400)]), 0);
+        // the other mask covering the end is the masks meeting, not a spacing
+        assert_eq!(count("eol E 1/1 70 eolmax=40 ext=16 to=1/2", vec![wire, bx(1, 2, 0, 200, 30, 301)]), 0);
     }
 
     /// Rule (eol, toeol): two line ends facing each other closer than d; a line end facing a
@@ -763,6 +825,18 @@ mod tests {
         // a stitched wire (1/1 and 1/2 overlapping) between two shapes: no cycle through it
         let st = vec![bx(1, 1, 0, 0, 100, 30), bx(1, 2, 90, 0, 200, 30), bx(1, 1, 50, 80, 150, 110)];
         assert_eq!(count(r, st), 0);
+    }
+
+    /// Rule (stitch): each place the two masks overlap or abut is one result; apart, none.
+    #[test]
+    fn every_meeting_of_the_masks_is_listed() {
+        let r = "stitch M 1/1 1/2";
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 30), bx(1, 2, 80, 0, 200, 30)]), 1, "overlap");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 30), bx(1, 2, 100, 0, 200, 30)]), 1, "abut");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 30), bx(1, 2, 101, 0, 200, 30)]), 0, "apart");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 30), bx(1, 2, 100, 30, 200, 60)]), 0, "a corner only");
+        // one E2 shape over two touching E1 pieces is one meeting
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 30), bx(1, 1, 100, 0, 200, 30), bx(1, 2, 50, 0, 150, 30)]), 1);
     }
 
     /// Region options: `exclude=` drops a result inside the marker, `only=` keeps only those.
