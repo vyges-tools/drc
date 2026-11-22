@@ -68,6 +68,7 @@
 //!   across space closer than `d`, side to side only, the shared run longer than `r` (default 0).
 //!   `bridge`: the part of the run over metal joining the wide part to the other side's part
 //!   beyond it (a neck) is dropped; what is left must be longer than `r`. No shielding then.
+//!   `bridge2`: the same for metal touching exactly two wide parts (space and notch between them).
 //! - `rectangle L...`: a merged polygon (of the union) that is not a rectangle.
 //! - `size L... w h`: a merged polygon that is not a `w` by `h` rectangle, either way round.
 //! - `notchecked` states a rule the file knows of and this engine does not check, so the report
@@ -129,8 +130,9 @@ pub enum Kind {
     /// The wide part (width > `w`) of the union facing the union (or, `to=`, its part wider than
     /// `to`) across space closer than `d`, side to side only, run length above `run`.
     /// `bridge`: the run over metal that touches both the wide part and the other side's part
-    /// beyond it (a neck inside one polygon) is not space.
-    WideSpace { layers: Vec<Layer>, w: i64, d: i64, to: Option<i64>, run: i64, bridge: bool },
+    /// beyond it (a neck inside one polygon) is not space; `bridge2`: over metal that touches two
+    /// wide parts.
+    WideSpace { layers: Vec<Layer>, w: i64, d: i64, to: Option<i64>, run: i64, bridge: Bridge },
     NotChecked { why: String },
 }
 
@@ -228,7 +230,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
             out.push(MaskRule { name, kind: Kind::NotChecked { why }, region: Region::All });
             continue;
         }
-        let (pos, opts): (Vec<&str>, Vec<&str>) = toks[2..].iter().partition(|t| !t.contains('=') && **t != "toeol" && **t != "touch" && **t != "bridge");
+        let (pos, opts): (Vec<&str>, Vec<&str>) = toks[2..].iter().partition(|t| !t.contains('=') && **t != "toeol" && **t != "touch" && **t != "bridge" && **t != "bridge2");
         let layer = |k: usize| pos.get(k).and_then(|s| Layer::parse(s)).ok_or_else(|| err("expected a layer"));
         // a layer, or the union of several joined by `+`
         let lset = |k: usize| -> Result<Vec<Layer>, String> {
@@ -243,10 +245,13 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
         let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
         let mut toeol = false;
         let mut touch = false;
-        let mut bridge = false;
+        let mut bridge = Bridge::None;
         for o in &opts {
-            if *o == "bridge" {
-                bridge = true;
+            if *o == "bridge" || *o == "bridge2" {
+                if bridge != Bridge::None {
+                    return Err(err("one bridge option per rule"));
+                }
+                bridge = if *o == "bridge" { Bridge::Beyond } else { Bridge::Two };
                 continue;
             }
             if *o == "toeol" {
@@ -406,7 +411,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
         if toeol && kind != "eol" {
             return Err(err("toeol applies to eol only"));
         }
-        if bridge && kind != "widespace" {
+        if bridge != Bridge::None && kind != "widespace" {
             return Err(err("bridge applies to widespace only"));
         }
         if touch && kind != "space2" {
@@ -418,6 +423,16 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
 }
 
 /// One layer's merged geometry: the tiles of its union, their index, and its boundary rings.
+/// Which metal inside a widespace gap is a bridge (not space).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bridge {
+    None,
+    /// touches the wide part and the other side's part outside it
+    Beyond,
+    /// touches exactly two wide parts
+    Two,
+}
+
 struct Merged {
     tiles: Vec<Rect>,
     idx: RegionIndex,
@@ -492,10 +507,24 @@ fn wide_part(m: &Merged, w: i64) -> Merged {
 
 /// Side-to-side pairs of the wide part `a` and `b` closer than `d`, no shielding, where the gap
 /// is checked edge by edge: the part of the shared run under a bridge (a piece of the union `m`
-/// inside the gap that touches `a` and touches `b` outside `a`) is dropped, what is left of the
-/// run must be longer than `run`. Any other metal in the gap does not hide the pair.
-fn bridged_pairs(a: &Merged, b: &Merged, m: &Merged, d: i64, run: i64) -> Vec<Marker> {
+/// inside the gap that touches `a` and touches `b` outside `a`, or with `Two` that touches two
+/// polygons of `a`) is dropped, what is left of the run must be longer than `run`. Any other
+/// metal in the gap does not hide the pair.
+fn bridged_pairs(a: &Merged, b: &Merged, m: &Merged, d: i64, run: i64, mode: Bridge) -> Vec<Marker> {
     let b_not_a = Merged::from_tiles(&boolean::boolean(&b.tiles, &a.tiles, Op::Not));
+    // the wide polygon each tile of `a` belongs to, for `Two`
+    let mut part_of = vec![0usize; a.tiles.len()];
+    for (k, comp) in components(a).iter().enumerate() {
+        for &i in comp {
+            part_of[i] = k;
+        }
+    }
+    let parts_met = |r: &Rect| -> BTreeSet<usize> {
+        a.idx.overlaps(&grown(r, 1)).into_iter().map(|i| i as usize).filter(|&i| {
+            let t = a.tiles[i];
+            t.x0 <= r.x1 && r.x0 <= t.x1 && t.y0 <= r.y1 && r.y0 <= t.y1
+        }).map(|i| part_of[i]).collect()
+    };
     let eb = b.edges();
     let boxes: Vec<Rect> = eb.iter().map(bbox_edge).collect();
     let idx = RegionIndex::build(&boxes);
@@ -529,7 +558,12 @@ fn bridged_pairs(a: &Merged, b: &Merged, m: &Merged, d: i64, run: i64) -> Vec<Ma
             let mut cut: Vec<(i32, i32)> = Vec::new();
             for comp in components(&inside) {
                 let t: Vec<Rect> = comp.iter().map(|&i| inside.tiles[i]).collect();
-                if t.iter().any(|r| a.meets(r)) && t.iter().any(|r| b_not_a.meets(r)) {
+                let is_bridge = match mode {
+                    Bridge::None => false,
+                    Bridge::Beyond => t.iter().any(|r| a.meets(r)) && t.iter().any(|r| b_not_a.meets(r)),
+                    Bridge::Two => t.iter().flat_map(&parts_met).collect::<BTreeSet<usize>>().len() == 2,
+                };
+                if is_bridge {
                     let bb = bbox_of(&t).expect("a component has tiles");
                     cut.push(if horiz { (bb.x0, bb.x1) } else { (bb.y0, bb.y1) });
                 }
@@ -1080,8 +1114,8 @@ fn shape_rule(kind: &Kind, m: &Merged, layers: &[Layer], polys: &BTreeMap<Layer,
                 }
                 None => m,
             };
-            if *bridge {
-                (*d, bridged_pairs(&a, b, m, *d, *run))
+            if *bridge != Bridge::None {
+                (*d, bridged_pairs(&a, b, m, *d, *run, *bridge))
             } else {
                 (*d, ext_pairs(&a.edges(), &b.edges(), *d, &a, b, Some(*run)))
             }
@@ -1621,6 +1655,24 @@ mod tests {
         let deep = bx(1, 1, 200, 60, 230, 140);
         assert_eq!(count(r, vec![block.clone(), part.clone(), deep]), 0, "a stub the opening takes in");
         assert!(parse("space W 1/1 50 bridge").is_err(), "bridge is widespace only");
+    }
+
+    /// Rule (widespace bridge2): between two wide parts (space or notch) a neck touching both is
+    /// not space; a stub touching one is; `bridge` (the part beyond) finds no bridge here.
+    #[test]
+    fn a_neck_between_two_wide_parts_is_a_bridge2() {
+        let (b1, b2) = (bx(1, 1, 0, 0, 200, 200), bx(1, 1, 250, 0, 450, 200));
+        let neck = bx(1, 1, 200, 80, 250, 120);
+        let r = "widespace W 1/1 120 56 to=120 bridge2";
+        assert_eq!(count(r, vec![b1.clone(), b2.clone(), neck.clone()]), 1, "air of 80 above and below");
+        let r80 = "widespace W 1/1 120 56 to=120 bridge2 run=80";
+        assert_eq!(count(r80, vec![b1.clone(), b2.clone(), neck.clone()]), 0, "80 left, not more");
+        assert_eq!(count(r80, vec![b1.clone(), b2.clone()]), 1, "no neck: 200");
+        let stub = bx(1, 1, 200, 80, 230, 120);
+        assert_eq!(count(r80, vec![b1.clone(), b2.clone(), stub]), 1, "a stub touches one part");
+        let beyond = "widespace W 1/1 120 56 to=120 bridge run=80";
+        assert_eq!(count(beyond, vec![b1.clone(), b2.clone(), neck.clone()]), 1, "no part beyond: no bridge");
+        assert!(parse("widespace W 1/1 120 56 bridge bridge2").is_err(), "one bridge option");
     }
 
     /// Rule (rectangle, size): a merged polygon that is not a rectangle; one that is not w by h
