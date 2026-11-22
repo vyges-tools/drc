@@ -1812,10 +1812,10 @@ mod tests {
         let to = "widespace W 1/1 120 56 to=60";
         assert_eq!(count(to, vec![bx(1, 1, 0, 0, 1000, 200), bx(1, 1, 0, 250, 1000, 290)]), 0, "a 40 wire is not wider than 60");
         assert_eq!(count(to, vec![bx(1, 1, 0, 0, 1000, 200), bx(1, 1, 0, 250, 1000, 330)]), 1, "an 80 wire is");
-        // an odd width: wider than 63 is 64 and up
-        let odd = "widespace W 1/1 1/2 63 50";
-        assert_eq!(count(odd, vec![bx(1, 1, 0, 0, 1000, 63), bx(1, 2, 0, 103, 1000, 143)]), 0, "63 is not wider than 63");
-        assert_eq!(count(odd, vec![bx(1, 1, 0, 0, 1000, 64), bx(1, 2, 0, 104, 1000, 144)]), 1, "64 is");
+        // an odd width: wider than 61 is 62 and up
+        let odd = "widespace W 1/1 1/2 61 50";
+        assert_eq!(count(odd, vec![bx(1, 1, 0, 0, 1000, 61), bx(1, 2, 0, 101, 1000, 141)]), 0, "61 is not wider than 61");
+        assert_eq!(count(odd, vec![bx(1, 1, 0, 0, 1000, 62), bx(1, 2, 0, 102, 1000, 142)]), 1, "62 is");
         assert!(parse("widespace W 1/1 0 50").is_err(), "a width must be positive");
     }
 
@@ -1903,18 +1903,18 @@ mod tests {
         // a bar 0..400 x 0..100 with a notch 180..220 cut from the top down to y=40: 40 of metal
         // behind, a bottom 40 long, sides 60 long
         let notched = vec![bx(1, 1, 0, 0, 180, 100), bx(1, 1, 180, 0, 220, 40), bx(1, 1, 220, 0, 400, 100)];
-        let r = "notch W 1/1 80 120 44";
+        let r = "notch W 1/1 90 130 46";
         assert_eq!(count(r, notched.clone()), 1, "40 behind");
-        assert_eq!(count("notch W 1/1 80 120 40", notched.clone()), 0, "40 is not less than 40");
-        assert_eq!(count("notch W 1/1 40 120 44", notched.clone()), 0, "the bottom is 40, not shorter than 40");
-        assert_eq!(count("notch W 1/1 80 60 44", notched.clone()), 0, "the sides are 60, not shorter than 60");
-        assert_eq!(count("notch W 1/1 80 61 44", notched.clone()), 1, "sides shorter than 61");
+        assert_eq!(count("notch W 1/1 90 130 40", notched.clone()), 0, "40 is not less than 40");
+        assert_eq!(count("notch W 1/1 40 130 46", notched.clone()), 0, "the bottom is 40, not shorter than 40");
+        assert_eq!(count("notch W 1/1 90 60 46", notched.clone()), 0, "the sides are 60, not shorter than 60");
+        assert_eq!(count("notch W 1/1 90 61 46", notched.clone()), 1, "sides shorter than 61");
         let deep = vec![bx(1, 1, 0, 0, 180, 100), bx(1, 1, 180, 0, 220, 50), bx(1, 1, 220, 0, 400, 100)];
         assert_eq!(count(r, deep), 0, "50 behind is not thin");
         // a short shelf (its top has one concave end) is no notch bottom, though 40 lies under it
         let shelf = vec![bx(1, 1, 0, 0, 200, 100), bx(1, 1, 200, 0, 240, 40)];
         assert_eq!(count(r, shelf), 0, "a shelf");
-        // one side long, the other short: a side shorter than 120 is enough
+        // one side long, the other short: a side shorter than 130 is enough
         let lop = vec![bx(1, 1, 0, 0, 180, 200), bx(1, 1, 180, 0, 220, 40), bx(1, 1, 220, 0, 400, 100)];
         assert_eq!(count(r, lop), 1, "sides 160 and 60");
         // a floating piece inside a notch with thick metal behind is outside, not behind
@@ -1937,7 +1937,7 @@ mod tests {
         assert_eq!(count(r, lid), 1, "the bar under the notch, not the wire over it");
         let mut close = notched.clone();
         close.push(bx(1, 1, 0, 110, 400, 140)); // 10 over the mouth: still outside
-        assert_eq!(count("notch W 1/1 80 120 41", close), 1, "outside metal 70 away from the bottom is not behind; 40 is");
+        assert_eq!(count("notch W 1/1 90 130 41", close), 1, "outside metal 70 away from the bottom is not behind; 40 is");
     }
 
     /// Rule (rectangle, size): a merged polygon that is not a rectangle; one that is not w by h
