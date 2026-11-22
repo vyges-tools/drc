@@ -134,6 +134,9 @@ pub struct RuleResult {
     /// What the rule measured (windows for `ratio`, else 0): a clean `ratio` that measured no
     /// window is vacuous.
     pub measured: usize,
+    /// For `ratio`: the lowest and highest ratio over the measured windows, ppm (how balanced,
+    /// not only whether a bound broke).
+    pub range_ppm: Option<(i64, i64)>,
 }
 
 /// Parse a rule file. Every line is a rule or a comment (`#`); anything else is an error with
@@ -649,29 +652,33 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
     }
     let merged: BTreeMap<Layer, Merged> = want.iter().map(|l| (*l, Merged::new(polys.get(l).map_or(&[][..], |v| v)))).collect();
     let mut out = Vec::new();
+    // unions shared between rules (a balance rule pair, min and max, reads the same two)
+    let mut unions: BTreeMap<Vec<Layer>, Merged> = BTreeMap::new();
     for r in rules {
         let (limit, markers) = match &r.kind {
             Kind::NotChecked { why } => {
-                out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit: 0, checked: false, why_not: Some(why.clone()), markers: vec![], measured: 0 });
+                out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit: 0, checked: false, why_not: Some(why.clone()), markers: vec![], measured: 0, range_ppm: None });
                 continue;
             }
             Kind::Ratio { num, den, window, step, min, max, exempt, inside, min_extent } => {
-                let union = |ls: &[Layer]| -> Merged {
-                    let v: Vec<Vec<(i32, i32)>> = ls.iter().flat_map(|l| polys.get(l).cloned().unwrap_or_default()).collect();
-                    Merged::new(&v)
-                };
-                let (mn, md, mx) = (union(num), union(den), union(exempt));
+                for ls in [num, den, exempt] {
+                    unions.entry(ls.clone()).or_insert_with(|| {
+                        let v: Vec<Vec<(i32, i32)>> = ls.iter().flat_map(|l| polys.get(l).cloned().unwrap_or_default()).collect();
+                        Merged::new(&v)
+                    });
+                }
+                let (mn, md, mx) = (&unions[num], &unions[den], &unions[exempt]);
                 let ext = match inside {
                     Some(l) => bbox_of(&merged[l].tiles),
                     None => cell_bbox(&cell),
                 };
                 let wide = |e: &Rect| i64::from(e.x1) - i64::from(e.x0) >= *min_extent && i64::from(e.y1) - i64::from(e.y0) >= *min_extent;
-                let (markers, measured) = match ext.filter(wide) {
-                    None => (Vec::new(), 0),
-                    Some(ext) => ratio_windows(&mn, &md, (!exempt.is_empty()).then_some(&mx), ext, *window, *step, *min, *max),
+                let (markers, measured, range_ppm) = match ext.filter(wide) {
+                    None => (Vec::new(), 0, None),
+                    Some(ext) => ratio_windows(mn, md, (!exempt.is_empty()).then_some(mx), ext, *window, *step, *min, *max),
                 };
                 let limit = min.or(*max).unwrap_or(0);
-                out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured });
+                out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured, range_ppm });
                 continue;
             }
             Kind::Space { layer, d } => {
@@ -756,7 +763,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                     .collect()
             }
         };
-        out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured: 0 });
+        out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured: 0, range_ppm: None });
     }
     Ok(out)
 }
@@ -806,9 +813,10 @@ fn area_in(m: &Merged, w: &Rect) -> i64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn ratio_windows(num: &Merged, den: &Merged, exempt: Option<&Merged>, ext: Rect, window: i64, step: i64, min: Option<i64>, max: Option<i64>) -> (Vec<Marker>, usize) {
+fn ratio_windows(num: &Merged, den: &Merged, exempt: Option<&Merged>, ext: Rect, window: i64, step: i64, min: Option<i64>, max: Option<i64>) -> (Vec<Marker>, usize, Option<(i64, i64)>) {
     let mut out = Vec::new();
     let mut measured = 0;
+    let mut range: Option<(i64, i64)> = None;
     for (y0, y1) in window_starts(ext.y0, ext.y1, window, step) {
         for (x0, x1) in window_starts(ext.x0, ext.x1, window, step) {
             let w = Rect { x0, y0, x1, y1 };
@@ -822,12 +830,14 @@ fn ratio_windows(num: &Merged, den: &Merged, exempt: Option<&Merged>, ext: Rect,
             measured += 1;
             // num/den < m/1e6, exact: num*1e6 < m*den (i128: areas reach 1e18 on a large die)
             let (n, d) = (i128::from(area_in(num, &w)) * 1_000_000, i128::from(d));
+            let ppm = (n / d) as i64;
+            range = Some(range.map_or((ppm, ppm), |(lo, hi)| (lo.min(ppm), hi.max(ppm))));
             if min.is_some_and(|m| n < i128::from(m) * d) || max.is_some_and(|m| n > i128::from(m) * d) {
-                out.push(Marker::Window { rect: w, ppm: (n / d) as i64 });
+                out.push(Marker::Window { rect: w, ppm });
             }
         }
     }
-    (out, measured)
+    (out, measured, range)
 }
 
 /// The results in the ASCII results-database layout: a header line (`top precision`), then per
@@ -1063,11 +1073,13 @@ mod tests {
         let two = vec![bx(1, 1, 0, 0, 50, 50), bx(1, 2, 50, 0, 100, 50), bx(1, 2, 150, 0, 200, 50)];
         let r = check(&lib(two), None, &parse(min).unwrap()).unwrap();
         assert_eq!(r[0].measured, 3);
+        // the range over the measured windows: 0 (two E2-only windows) to 0.5 (the left one)
+        assert_eq!(r[0].range_ppm, Some((0, 500_000)));
         let w = |x0| Marker::Window { rect: Rect { x0, y0: 0, x1: x0 + 100, y1: 50 }, ppm: 0 };
         assert_eq!(r[0].markers, vec![w(50), w(100)]);
         // only NUM-free, DEN-free windows: nothing measured, so a clean count is vacuous
         let r = check(&lib(vec![bx(2, 0, 0, 0, 10, 10)]), None, &parse(min).unwrap()).unwrap();
-        assert_eq!((r[0].measured, r[0].markers.len()), (0, 0));
+        assert_eq!((r[0].measured, r[0].markers.len(), r[0].range_ppm), (0, 0, None));
     }
 
     /// Rule (ratio): a window touching the exempt layer is not measured; `inside=` sets the
