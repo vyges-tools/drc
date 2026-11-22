@@ -13,7 +13,7 @@
 //! eol         R.S.4_A       20/1 70 eolmax=80 adjmin=20 ext=16       [lenlt=N | lenge=N] [to=L | toeol] [exclude=L | only=L]
 //! oddcycle    R.colour      20/1 20/2 66
 //! stitch      R.stitch      20/1 20/2
-//! ratio       R.DEN.7       20/1 / 20/1 20/2 20/0   window=25000 step=12500 min=0.2   [exempt=L] [inside=L]
+//! ratio       R.DEN.7       20/1 / 20/1 20/2 20/0   window=25000 step=12500 min=0.2   [exempt=L,L..] [inside=L] [minextent=D]
 //! notchecked  R.C.10_A      why it is not checked, free text
 //! ```
 //!
@@ -39,9 +39,10 @@
 //!   from the extent's lower left, the last row and column backed up to end on the extent (an
 //!   extent smaller than a window is one window), the area of the union of the NUM layers divided
 //!   by the area of the union of the DEN layers is below `min=` (or above `max=`). A window with
-//!   no DEN area, or touching the `exempt=` layer, is not measured. The extent is the bounding box
-//!   of the `inside=` layer, else of the whole layout. Each failing window is one result, its
-//!   ratio in parts per million.
+//!   no DEN area, or touching any `exempt=` layer, is not measured. The extent is the bounding box
+//!   of the `inside=` layer, else of the whole layout; an extent narrower than `minextent=` on
+//!   either axis is not measured at all. Each failing window is one result, its ratio in parts
+//!   per million.
 //! - `exclude=L` drops a result whose shapes both lie in layer L (touch it); `only=L` keeps only
 //!   those. A region marker, read by interaction.
 //! - `notchecked` states a rule the file knows of and this engine does not check, so the report
@@ -85,7 +86,7 @@ pub enum Kind {
     Eol { layer: Layer, d: i64, eol_max: i64, adj_min: i64, ext: i64, len_lt: Option<i64>, len_ge: Option<i64>, to: EolTarget },
     OddCycle { a: Layer, b: Layer, d: i64 },
     Stitch { a: Layer, b: Layer },
-    Ratio { num: Vec<Layer>, den: Vec<Layer>, window: i64, step: i64, min: Option<i64>, max: Option<i64>, exempt: Option<Layer>, inside: Option<Layer> },
+    Ratio { num: Vec<Layer>, den: Vec<Layer>, window: i64, step: i64, min: Option<i64>, max: Option<i64>, exempt: Vec<Layer>, inside: Option<Layer>, min_extent: i64 },
     NotChecked { why: String },
 }
 
@@ -236,7 +237,12 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
                 let l = |k: &str| -> Result<Option<Layer>, String> {
                     kv.get(k).map(|v| Layer::parse(v).ok_or_else(|| err("bad layer option"))).transpose()
                 };
-                Kind::Ratio { num, den, window, step, min, max, exempt: l("exempt")?, inside: l("inside")? }
+                let exempt = match kv.get("exempt") {
+                    Some(v) => v.split(',').map(|s| Layer::parse(s).ok_or_else(|| err("bad exempt= layer"))).collect::<Result<Vec<_>, _>>()?,
+                    None => Vec::new(),
+                };
+                let min_extent = opt("minextent")?.unwrap_or(0);
+                Kind::Ratio { num, den, window, step, min, max, exempt, inside: l("inside")?, min_extent }
             }
             "eol" => {
                 want(2)?;
@@ -262,7 +268,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
         };
         let allowed: &[&str] = match kind {
             "eol" => &["eolmax", "adjmin", "ext", "lenlt", "lenge", "to"],
-            "ratio" => &["window", "step", "min", "max", "exempt", "inside"],
+            "ratio" => &["window", "step", "min", "max", "exempt", "inside", "minextent"],
             _ => &[],
         };
         if let Some(k) = kv.keys().find(|k| !allowed.contains(k)) {
@@ -625,8 +631,8 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 }
             }
             Kind::Ratio { num, den, exempt, inside, .. } => {
-                want.extend(num.iter().chain(den).copied());
-                want.extend(exempt.iter().chain(inside).copied());
+                want.extend(num.iter().chain(den).chain(exempt).copied());
+                want.extend(inside.iter().copied());
             }
             Kind::NotChecked { .. } => {}
         }
@@ -649,19 +655,20 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit: 0, checked: false, why_not: Some(why.clone()), markers: vec![], measured: 0 });
                 continue;
             }
-            Kind::Ratio { num, den, window, step, min, max, exempt, inside } => {
+            Kind::Ratio { num, den, window, step, min, max, exempt, inside, min_extent } => {
                 let union = |ls: &[Layer]| -> Merged {
                     let v: Vec<Vec<(i32, i32)>> = ls.iter().flat_map(|l| polys.get(l).cloned().unwrap_or_default()).collect();
                     Merged::new(&v)
                 };
-                let (mn, md) = (union(num), union(den));
+                let (mn, md, mx) = (union(num), union(den), union(exempt));
                 let ext = match inside {
                     Some(l) => bbox_of(&merged[l].tiles),
                     None => cell_bbox(&cell),
                 };
-                let (markers, measured) = match ext {
+                let wide = |e: &Rect| i64::from(e.x1) - i64::from(e.x0) >= *min_extent && i64::from(e.y1) - i64::from(e.y0) >= *min_extent;
+                let (markers, measured) = match ext.filter(wide) {
                     None => (Vec::new(), 0),
-                    Some(ext) => ratio_windows(&mn, &md, exempt.map(|l| &merged[&l]), ext, *window, *step, *min, *max),
+                    Some(ext) => ratio_windows(&mn, &md, (!exempt.is_empty()).then_some(&mx), ext, *window, *step, *min, *max),
                 };
                 let limit = min.or(*max).unwrap_or(0);
                 out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured });
@@ -1079,6 +1086,15 @@ mod tests {
             v.push(bx(8, 0, 0, 0, 100, 100));
             v
         }), 1);
+        // exempt is a union: the second layer of the list exempts the window too
+        let mut ex2 = vec![bx(1, 1, 0, 0, 99, 10), bx(1, 2, 0, 20, 100, 60)];
+        ex2.push(bx(9, 1, 90, 90, 95, 95));
+        assert_eq!(count("ratio B 1/1 / 1/1 1/2 window=100 step=50 min=0.2 exempt=9/0,9/1", ex2.clone()), 0);
+        assert_eq!(count("ratio B 1/1 / 1/1 1/2 window=100 step=50 min=0.2 exempt=9/0", ex2), 1);
+        // minextent: the 100 x 60 layout is narrower than 61 in y, so nothing is measured
+        let r = check(&lib(vec![bx(1, 1, 0, 0, 99, 10), bx(1, 2, 0, 20, 100, 60)]), None, &parse("ratio B 1/1 / 1/1 1/2 window=100 step=50 min=0.2 minextent=61").unwrap()).unwrap();
+        assert_eq!((r[0].measured, r[0].markers.len()), (0, 0));
+        assert_eq!(count("ratio B 1/1 / 1/1 1/2 window=100 step=50 min=0.2 minextent=60", vec![bx(1, 1, 0, 0, 99, 10), bx(1, 2, 0, 20, 100, 60)]), 1);
         // a guard layer far from the metal: windows inside it hold no DEN area
         let mut g = below;
         g.push(bx(8, 0, 1000, 1000, 1100, 1100));
@@ -1102,7 +1118,8 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }
-        assert!(parse("ratio B 1/1 / 1/1 1/2 window=100 step=50 max=0.8 exempt=9/0 inside=8/0").is_ok());
+        assert!(parse("ratio B 1/1 / 1/1 1/2 window=100 step=50 max=0.8 exempt=9/0,9/1 inside=8/0 minextent=100").is_ok());
+        assert!(parse("ratio B 1/1 / 1/2 window=100 step=50 min=0.2 exempt=9/0,x").is_err());
     }
 
 }
