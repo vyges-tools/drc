@@ -66,6 +66,8 @@
 //! - `widespace L... w d [to=w2] [run=r]`: the part of the union wider than `w` (an opening: shrink
 //!   by `w / 2`, grow back; `w` even) facing the union, or with `to=` its part wider than `w2`,
 //!   across space closer than `d`, side to side only, the shared run longer than `r` (default 0).
+//!   `bridge`: the part of the run over metal joining the wide part to the other side's part
+//!   beyond it (a neck) is dropped; what is left must be longer than `r`. No shielding then.
 //! - `rectangle L...`: a merged polygon (of the union) that is not a rectangle.
 //! - `size L... w h`: a merged polygon that is not a `w` by `h` rectangle, either way round.
 //! - `notchecked` states a rule the file knows of and this engine does not check, so the report
@@ -126,7 +128,9 @@ pub enum Kind {
     Size { layers: Vec<Layer>, w: i64, h: i64 },
     /// The wide part (width > `w`) of the union facing the union (or, `to=`, its part wider than
     /// `to`) across space closer than `d`, side to side only, run length above `run`.
-    WideSpace { layers: Vec<Layer>, w: i64, d: i64, to: Option<i64>, run: i64 },
+    /// `bridge`: the run over metal that touches both the wide part and the other side's part
+    /// beyond it (a neck inside one polygon) is not space.
+    WideSpace { layers: Vec<Layer>, w: i64, d: i64, to: Option<i64>, run: i64, bridge: bool },
     NotChecked { why: String },
 }
 
@@ -224,7 +228,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
             out.push(MaskRule { name, kind: Kind::NotChecked { why }, region: Region::All });
             continue;
         }
-        let (pos, opts): (Vec<&str>, Vec<&str>) = toks[2..].iter().partition(|t| !t.contains('=') && **t != "toeol" && **t != "touch");
+        let (pos, opts): (Vec<&str>, Vec<&str>) = toks[2..].iter().partition(|t| !t.contains('=') && **t != "toeol" && **t != "touch" && **t != "bridge");
         let layer = |k: usize| pos.get(k).and_then(|s| Layer::parse(s)).ok_or_else(|| err("expected a layer"));
         // a layer, or the union of several joined by `+`
         let lset = |k: usize| -> Result<Vec<Layer>, String> {
@@ -239,7 +243,12 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
         let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
         let mut toeol = false;
         let mut touch = false;
+        let mut bridge = false;
         for o in &opts {
+            if *o == "bridge" {
+                bridge = true;
+                continue;
+            }
             if *o == "toeol" {
                 toeol = true;
                 continue;
@@ -329,7 +338,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
                 if w % 2 != 0 || to.is_some_and(|t| t % 2 != 0) {
                     return Err(err("widespace widths must be even (DB units)"));
                 }
-                Kind::WideSpace { layers, w, d, to, run: opt("run")?.unwrap_or(0) }
+                Kind::WideSpace { layers, w, d, to, run: opt("run")?.unwrap_or(0), bridge }
             }
             "width" | "area" | "hole" | "shortvertex" | "orthogonal" | "rectangle" | "size" => {
                 // layers (their union), then the value; `orthogonal` and `rectangle` take none, `size` two
@@ -397,6 +406,9 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
         if toeol && kind != "eol" {
             return Err(err("toeol applies to eol only"));
         }
+        if bridge && kind != "widespace" {
+            return Err(err("bridge applies to widespace only"));
+        }
         if touch && kind != "space2" {
             return Err(err("touch applies to space2 only"));
         }
@@ -443,6 +455,15 @@ impl Merged {
         (!hit.is_empty()).then_some(hit)
     }
 
+    /// Does the closed rectangle `q` meet the region, an edge or a corner in common enough? (The
+    /// index query is widened by one unit: it only returns tiles that overlap with area.)
+    fn meets(&self, q: &Rect) -> bool {
+        self.idx.overlaps(&grown(q, 1)).into_iter().any(|i| {
+            let t = self.tiles[i as usize];
+            t.x0 <= q.x1 && q.x0 <= t.x1 && t.y0 <= q.y1 && q.y0 <= t.y1
+        })
+    }
+
     /// Does the closed rectangle `q` touch the region?
     fn touches(&self, q: &Rect) -> bool {
         self.idx.overlaps(q).into_iter().any(|i| {
@@ -467,6 +488,73 @@ fn wide_part(m: &Merged, w: i64) -> Merged {
     let core = boolean::boolean(&m.tiles, &reach, Op::Not);
     let back: Vec<Rect> = core.iter().map(|t| grown(t, r)).collect();
     Merged::from_tiles(&boolean::boolean(&back, &m.tiles, Op::And))
+}
+
+/// Side-to-side pairs of the wide part `a` and `b` closer than `d`, no shielding, where the gap
+/// is checked edge by edge: the part of the shared run under a bridge (a piece of the union `m`
+/// inside the gap that touches `a` and touches `b` outside `a`) is dropped, what is left of the
+/// run must be longer than `run`. Any other metal in the gap does not hide the pair.
+fn bridged_pairs(a: &Merged, b: &Merged, m: &Merged, d: i64, run: i64) -> Vec<Marker> {
+    let b_not_a = Merged::from_tiles(&boolean::boolean(&b.tiles, &a.tiles, Op::Not));
+    let eb = b.edges();
+    let boxes: Vec<Rect> = eb.iter().map(bbox_edge).collect();
+    let idx = RegionIndex::build(&boxes);
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for ea in a.edges() {
+        for j in idx.within(&bbox_edge(&ea), d as i32, None) {
+            let eb = &eb[j as usize];
+            if ea.axis() != eb.axis() || !projecting_edges(&ea, eb) {
+                continue;
+            }
+            let (ra, rb) = (bbox_edge(&ea), bbox_edge(eb));
+            let horiz = ea.axis() == Axis::Horizontal;
+            let (pa, pb) = if horiz { (ra.y0, rb.y0) } else { (ra.x0, rb.x0) };
+            let gap = i64::from((pb - pa).abs());
+            if gap == 0 || gap >= d {
+                continue;
+            }
+            let dir = if horiz { (0, (pb - pa).signum() as i64) } else { ((pb - pa).signum() as i64, 0) };
+            let (oa, ob) = (outward_edge(&ea), outward_edge(eb));
+            if oa.0 * dir.0 + oa.1 * dir.1 <= 0 || ob.0 * dir.0 + ob.1 * dir.1 >= 0 {
+                continue;
+            }
+            let (lo, hi) = if horiz { (ra.x0.max(rb.x0), ra.x1.min(rb.x1)) } else { (ra.y0.max(rb.y0), ra.y1.min(rb.y1)) };
+            let g = if horiz {
+                Rect { x0: lo, y0: pa.min(pb), x1: hi, y1: pa.max(pb) }
+            } else {
+                Rect { x0: pa.min(pb), y0: lo, x1: pa.max(pb), y1: hi }
+            };
+            let inside = Merged::from_tiles(&boolean::boolean(&m.tiles, &[g], Op::And));
+            let mut cut: Vec<(i32, i32)> = Vec::new();
+            for comp in components(&inside) {
+                let t: Vec<Rect> = comp.iter().map(|&i| inside.tiles[i]).collect();
+                if t.iter().any(|r| a.meets(r)) && t.iter().any(|r| b_not_a.meets(r)) {
+                    let bb = bbox_of(&t).expect("a component has tiles");
+                    cut.push(if horiz { (bb.x0, bb.x1) } else { (bb.y0, bb.y1) });
+                }
+            }
+            cut.sort_unstable();
+            // the longest stretch of the shared run left uncovered
+            let (mut at, mut best) = (lo, 0i64);
+            for (c0, c1) in cut {
+                best = best.max(i64::from(c0 - at));
+                at = at.max(c1);
+            }
+            best = best.max(i64::from(hi - at));
+            if best <= run {
+                continue;
+            }
+            let k = {
+                let (x, y) = (seg(&ea), seg(eb));
+                if x <= y { (x, y) } else { (y, x) }
+            };
+            if seen.insert(k) {
+                out.push(Marker::Edges { a: seg(&ea), b: seg(eb), value: gap });
+            }
+        }
+    }
+    out
 }
 
 fn seg(e: &Edge) -> [i32; 4] {
@@ -982,7 +1070,7 @@ fn shape_rule(kind: &Kind, m: &Merged, layers: &[Layer], polys: &BTreeMap<Layer,
         Kind::Orthogonal { .. } => (0, off_axis(layers, polys)),
         Kind::Rectangle { .. } => (0, not_sized(m, None)),
         Kind::Size { w, h, .. } => (*w, not_sized(m, Some((*w, *h)))),
-        Kind::WideSpace { w, d, to, run, .. } => {
+        Kind::WideSpace { w, d, to, run, bridge, .. } => {
             let a = wide_part(m, *w);
             let other;
             let b: &Merged = match to {
@@ -992,7 +1080,11 @@ fn shape_rule(kind: &Kind, m: &Merged, layers: &[Layer], polys: &BTreeMap<Layer,
                 }
                 None => m,
             };
-            (*d, ext_pairs(&a.edges(), &b.edges(), *d, &a, b, Some(*run)))
+            if *bridge {
+                (*d, bridged_pairs(&a, b, m, *d, *run))
+            } else {
+                (*d, ext_pairs(&a.edges(), &b.edges(), *d, &a, b, Some(*run)))
+            }
         }
         _ => (0, Vec::new()),
     }
@@ -1499,6 +1591,36 @@ mod tests {
         assert_eq!(count(to, vec![bx(1, 1, 0, 0, 1000, 200), bx(1, 1, 0, 250, 1000, 290)]), 0, "a 40 wire is not wider than 60");
         assert_eq!(count(to, vec![bx(1, 1, 0, 0, 1000, 200), bx(1, 1, 0, 250, 1000, 330)]), 1, "an 80 wire is");
         assert!(parse("widespace W 1/1 121 50").is_err(), "odd width");
+    }
+
+    /// Rule (widespace bridge): a neck of metal joining the wide part to the other side's part is
+    /// not space, but only the run it covers; air beside it still is. Metal in the gap that does not
+    /// join both sides (floating, or a stub from one side only) hides nothing.
+    #[test]
+    fn a_bridge_hides_only_the_run_it_covers() {
+        let block = bx(1, 1, 0, 0, 200, 200);
+        let part = bx(1, 1, 250, 60, 1000, 140); // 80 wide, beyond to=60
+        let neck = bx(1, 1, 200, 80, 250, 120); // 40 wide, narrower than to=60
+        let r = "widespace W 1/1 120 56 to=60 bridge";
+        assert_eq!(count(r, vec![block.clone(), part.clone()]), 1, "plain space 50");
+        assert_eq!(count(r, vec![block.clone(), part.clone(), neck.clone()]), 1, "20 of air above and below the neck");
+        let r20 = "widespace W 1/1 120 56 to=60 bridge run=20";
+        assert_eq!(count(r20, vec![block.clone(), part.clone(), neck.clone()]), 0, "the air left is 20, not more");
+        assert_eq!(count(r20, vec![block.clone(), part.clone()]), 1, "no neck: the run is 80");
+        let float = bx(1, 1, 215, 60, 235, 140);
+        assert_eq!(count(r, vec![block.clone(), part.clone(), float]), 1, "floating metal is no bridge");
+        // 40 tall: no 60 square fits it, so it is not in the other side's part either
+        let stub = bx(1, 1, 200, 80, 230, 120);
+        assert_eq!(count(r20, vec![block.clone(), part.clone(), stub]), 1, "a stub from one side is no bridge");
+        // two wide parts joined by a neck: the other side is wide too, not the part beyond the wide
+        // one, so the neck is no bridge here (a wide-to-wide check is another rule's)
+        let block2 = bx(1, 1, 250, 0, 450, 200);
+        assert_eq!(count(r20, vec![block.clone(), block2, neck.clone()]), 1, "wide to wide across a neck");
+        // 80 tall: 60 squares straddling the block and the stub put it in the part wider than 60,
+        // so it joins the wide part to metal of the other side: a bridge (the opening's reading)
+        let deep = bx(1, 1, 200, 60, 230, 140);
+        assert_eq!(count(r, vec![block.clone(), part.clone(), deep]), 0, "a stub the opening takes in");
+        assert!(parse("space W 1/1 50 bridge").is_err(), "bridge is widespace only");
     }
 
     /// Rule (rectangle, size): a merged polygon that is not a rectangle; one that is not w by h
