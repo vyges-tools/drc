@@ -63,8 +63,8 @@
 //! - `hole L... a`: an enclosed hole whose area is below `a`.
 //! - `shortvertex L... d`: a boundary vertex whose two edges are both shorter than `d`.
 //! - `orthogonal L...`: a drawn polygon edge that is neither horizontal nor vertical.
-//! - `widespace L... w d [to=w2] [run=r]`: the part of the union wider than `w` (an opening: shrink
-//!   by `w / 2`, grow back; `w` even) facing the union, or with `to=` its part wider than `w2`,
+//! - `widespace L... w d [to=w2] [run=r]`: the part of the union wider than `w` (an opening by a
+//!   `w` square) facing the union, or with `to=` its part wider than `w2`,
 //!   across space closer than `d`, side to side only, the shared run longer than `r` (default 0).
 //!   `bridge`: the part of the run over metal joining the wide part to the other side's part
 //!   beyond it (a neck) is dropped; what is left must be longer than `r`. No shielding then.
@@ -344,9 +344,8 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
                 let layers: Vec<Layer> = pos[..pos.len() - 2].iter().map(|s| Layer::parse(s).ok_or_else(|| err("expected a layer"))).collect::<Result<_, _>>()?;
                 let (w, d) = (num(pos.len() - 2)?, num(pos.len() - 1)?);
                 let to = opt("to")?;
-                // the wide part is an opening by half the width: an odd width has no whole half
-                if w % 2 != 0 || to.is_some_and(|t| t % 2 != 0) {
-                    return Err(err("widespace widths must be even (DB units)"));
+                if w <= 0 || to.is_some_and(|t| t <= 0) {
+                    return Err(err("widespace widths must be positive"));
                 }
                 Kind::WideSpace { layers, w, d, to, run: opt("run")?.unwrap_or(0), bridge, jog: opt("jog")? }
             }
@@ -497,16 +496,20 @@ fn grown(t: &Rect, r: i32) -> Rect {
     Rect { x0: t.x0 - r, y0: t.y0 - r, x1: t.x1 + r, y1: t.y1 + r }
 }
 
-/// The part of the region wider than `w` (`w` even): shrink by `w / 2`, then grow back by the
-/// same (square sizing), within the region. A strip exactly `w` wide shrinks to nothing; one DB
-/// unit wider survives. This is the wide part of a polygon, not the whole polygon that has one.
+/// The part of the region wider than `w`: the union of the `w` x `w` squares inside it that do not
+/// degenerate (an opening by a square). Erode by the square `[0, w]^2` (a point stays when the
+/// square at it fits), dilate back by the same square, within the region. A strip exactly `w`
+/// wide erodes to a line, which has no area, so it is not wide; one DB unit wider is. The one-sided
+/// square makes any whole `w` work, odd or even. This is the wide part of a polygon, not the whole
+/// polygon that has one.
 fn wide_part(m: &Merged, w: i64) -> Merged {
-    let r = (w / 2) as i32;
+    let r = w as i32;
     let Some(bb) = bbox_of(&m.tiles) else { return Merged::from_tiles(&[]) };
     let outside = boolean::boolean(&[grown(&bb, r + 1)], &m.tiles, Op::Not);
-    let reach: Vec<Rect> = outside.iter().map(|t| grown(t, r)).collect();
+    // a point is lost when some outside point lies in its square: grow the outside left and down
+    let reach: Vec<Rect> = outside.iter().map(|t| Rect { x0: t.x0 - r, y0: t.y0 - r, x1: t.x1, y1: t.y1 }).collect();
     let core = boolean::boolean(&m.tiles, &reach, Op::Not);
-    let back: Vec<Rect> = core.iter().map(|t| grown(t, r)).collect();
+    let back: Vec<Rect> = core.iter().map(|t| Rect { x0: t.x0, y0: t.y0, x1: t.x1 + r, y1: t.y1 + r }).collect();
     Merged::from_tiles(&boolean::boolean(&back, &m.tiles, Op::And))
 }
 
@@ -1750,7 +1753,11 @@ mod tests {
         let to = "widespace W 1/1 120 56 to=60";
         assert_eq!(count(to, vec![bx(1, 1, 0, 0, 1000, 200), bx(1, 1, 0, 250, 1000, 290)]), 0, "a 40 wire is not wider than 60");
         assert_eq!(count(to, vec![bx(1, 1, 0, 0, 1000, 200), bx(1, 1, 0, 250, 1000, 330)]), 1, "an 80 wire is");
-        assert!(parse("widespace W 1/1 121 50").is_err(), "odd width");
+        // an odd width: wider than 63 is 64 and up
+        let odd = "widespace W 1/1 1/2 63 50";
+        assert_eq!(count(odd, vec![bx(1, 1, 0, 0, 1000, 63), bx(1, 2, 0, 103, 1000, 143)]), 0, "63 is not wider than 63");
+        assert_eq!(count(odd, vec![bx(1, 1, 0, 0, 1000, 64), bx(1, 2, 0, 104, 1000, 144)]), 1, "64 is");
+        assert!(parse("widespace W 1/1 0 50").is_err(), "a width must be positive");
     }
 
     /// Rule (widespace bridge): a neck of metal joining the wide part to the other side's part is
