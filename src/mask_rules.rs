@@ -69,6 +69,9 @@
 //!   `bridge`: the part of the run over metal joining the wide part to the other side's part
 //!   beyond it (a neck) is dropped; what is left must be longer than `r`. No shielding then.
 //!   `bridge2`: the same for metal touching exactly two wide parts (space and notch between them).
+//!   `jog=J`: the measured pieces are summed per cluster (pieces meeting on one line, and lines
+//!   joined by a step of the union no longer than `J` with exactly one convex end); a cluster
+//!   longer than `r` is one result (each side of the gap counts on its own).
 //! - `rectangle L...`: a merged polygon (of the union) that is not a rectangle.
 //! - `size L... w h`: a merged polygon that is not a `w` by `h` rectangle, either way round.
 //! - `notchecked` states a rule the file knows of and this engine does not check, so the report
@@ -132,7 +135,9 @@ pub enum Kind {
     /// `bridge`: the run over metal that touches both the wide part and the other side's part
     /// beyond it (a neck inside one polygon) is not space; `bridge2`: over metal that touches two
     /// wide parts.
-    WideSpace { layers: Vec<Layer>, w: i64, d: i64, to: Option<i64>, run: i64, bridge: Bridge },
+    /// `jog`: the measured pieces are summed per cluster (one line, or lines joined by a step no
+    /// longer than `jog`), and a cluster longer than `run` is one result.
+    WideSpace { layers: Vec<Layer>, w: i64, d: i64, to: Option<i64>, run: i64, bridge: Bridge, jog: Option<i64> },
     NotChecked { why: String },
 }
 
@@ -343,7 +348,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
                 if w % 2 != 0 || to.is_some_and(|t| t % 2 != 0) {
                     return Err(err("widespace widths must be even (DB units)"));
                 }
-                Kind::WideSpace { layers, w, d, to, run: opt("run")?.unwrap_or(0), bridge }
+                Kind::WideSpace { layers, w, d, to, run: opt("run")?.unwrap_or(0), bridge, jog: opt("jog")? }
             }
             "width" | "area" | "hole" | "shortvertex" | "orthogonal" | "rectangle" | "size" => {
                 // layers (their union), then the value; `orthogonal` and `rectangle` take none, `size` two
@@ -402,7 +407,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
             "eol" => &["eolmax", "adjmin", "ext", "lenlt", "lenge", "to", "toeol"],
             "ratio" => &["window", "step", "min", "max", "exempt", "inside", "minextent"],
             "area" => &["shape"],
-            "widespace" => &["to", "run"],
+            "widespace" => &["to", "run", "jog"],
             _ => &[],
         };
         if let Some(k) = kv.keys().find(|k| !allowed.contains(k)) {
@@ -510,7 +515,8 @@ fn wide_part(m: &Merged, w: i64) -> Merged {
 /// inside the gap that touches `a` and touches `b` outside `a`, or with `Two` that touches two
 /// polygons of `a`) is dropped, what is left of the run must be longer than `run`. Any other
 /// metal in the gap does not hide the pair.
-fn bridged_pairs(a: &Merged, b: &Merged, m: &Merged, d: i64, run: i64, mode: Bridge) -> Vec<Marker> {
+fn bridged_pairs(a: &Merged, b: &Merged, m: &Merged, d: i64, run: i64, mode: Bridge, jog: Option<i64>) -> Vec<Marker> {
+    let mut pieces: Vec<Piece> = Vec::new();
     let b_not_a = Merged::from_tiles(&boolean::boolean(&b.tiles, &a.tiles, Op::Not));
     // the wide polygon each tile of `a` belongs to, for `Two`
     let mut part_of = vec![0usize; a.tiles.len()];
@@ -569,13 +575,27 @@ fn bridged_pairs(a: &Merged, b: &Merged, m: &Merged, d: i64, run: i64, mode: Bri
                 }
             }
             cut.sort_unstable();
-            // the longest stretch of the shared run left uncovered
-            let (mut at, mut best) = (lo, 0i64);
+            // the stretches of the shared run left uncovered, and the longest
+            let (mut at, mut best, mut left) = (lo, 0i64, Vec::new());
             for (c0, c1) in cut {
+                if c0 > at {
+                    left.push((at, c0));
+                }
                 best = best.max(i64::from(c0 - at));
                 at = at.max(c1);
             }
+            if hi > at {
+                left.push((at, hi));
+            }
             best = best.max(i64::from(hi - at));
+            if jog.is_some() {
+                for &(l0, l1) in &left {
+                    for line in [pa, pb] {
+                        pieces.push(Piece { horiz, line, lo: l0, hi: l1, gap });
+                    }
+                }
+                continue;
+            }
             if best <= run {
                 continue;
             }
@@ -587,6 +607,110 @@ fn bridged_pairs(a: &Merged, b: &Merged, m: &Merged, d: i64, run: i64, mode: Bri
                 out.push(Marker::Edges { a: seg(&ea), b: seg(eb), value: gap });
             }
         }
+    }
+    match jog {
+        Some(j) => clusters(pieces, m, j, run),
+        None => out,
+    }
+}
+
+/// One measured stretch of an edge: on the line `line` (y for a horizontal edge, x for a
+/// vertical one), from `lo` to `hi`, at distance `gap` from its partner.
+#[derive(Debug, Clone, Copy)]
+struct Piece {
+    horiz: bool,
+    line: i32,
+    lo: i32,
+    hi: i32,
+    gap: i64,
+}
+
+/// Pieces summed per cluster. Pieces on one line that meet are one stretch; stretches are joined
+/// by a step of the union `m`: an edge across them no longer than `jog` with exactly one convex
+/// end, meeting exactly two stretches at its ends. A cluster longer than `run` is one result.
+fn clusters(pieces: Vec<Piece>, m: &Merged, jog: i64, run: i64) -> Vec<Marker> {
+    // stretches per line
+    // (horizontal, line) -> (lo, hi, gap)
+    type Span = (i32, i32, i64);
+    let mut by_line: BTreeMap<(bool, i32), Vec<Span>> = BTreeMap::new();
+    for p in &pieces {
+        by_line.entry((p.horiz, p.line)).or_default().push((p.lo, p.hi, p.gap));
+    }
+    let mut st: Vec<(bool, i32, i32, i32, i64)> = Vec::new(); // horiz, line, lo, hi, min gap
+    for ((h, line), mut v) in by_line {
+        v.sort_unstable();
+        let mut cur: Option<(i32, i32, i64)> = None;
+        for (lo, hi, g) in v {
+            cur = match cur {
+                Some((c0, c1, cg)) if lo <= c1 => Some((c0, c1.max(hi), cg.min(g))),
+                Some((c0, c1, cg)) => {
+                    st.push((h, line, c0, c1, cg));
+                    Some((lo, hi, g))
+                }
+                None => Some((lo, hi, g)),
+            };
+        }
+        if let Some((c0, c1, cg)) = cur {
+            st.push((h, line, c0, c1, cg));
+        }
+    }
+    let mut p: Vec<usize> = (0..st.len()).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let meets = |h: bool, pt: (i32, i32)| -> Vec<usize> {
+        let (line, at) = if h { (pt.1, pt.0) } else { (pt.0, pt.1) };
+        st.iter().enumerate().filter(|(_, s)| s.0 == h && s.1 == line && s.2 <= at && at <= s.3).map(|(i, _)| i).collect()
+    };
+    let cross = |e: &Edge, f: &Edge| -> i64 {
+        let (ux, uy) = (i64::from(e.b.0 - e.a.0), i64::from(e.b.1 - e.a.1));
+        let (vx, vy) = (i64::from(f.b.0 - f.a.0), i64::from(f.b.1 - f.a.1));
+        ux * vy - uy * vx
+    };
+    for ring in &m.rings {
+        let n = ring.len();
+        for i in 0..n {
+            let e = &ring[i];
+            let len = i64::from((e.b.0 - e.a.0).abs() + (e.b.1 - e.a.1).abs());
+            if len > jog {
+                continue;
+            }
+            // a convex corner turns left (metal on the left of the ring)
+            let convex = [cross(&ring[(i + n - 1) % n], e) > 0, cross(e, &ring[(i + 1) % n]) > 0];
+            if convex[0] == convex[1] {
+                continue;
+            }
+            // a vertical step joins horizontal stretches, and the other way round
+            let h = e.axis() != Axis::Horizontal;
+            let mut ids: Vec<usize> = meets(h, e.a).into_iter().chain(meets(h, e.b)).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.len() == 2 {
+                let (ra, rb) = (find(&mut p, ids[0]), find(&mut p, ids[1]));
+                p[ra.max(rb)] = ra.min(rb);
+            }
+        }
+    }
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..st.len() {
+        let r = find(&mut p, i);
+        groups.entry(r).or_default().push(i);
+    }
+    let mut out = Vec::new();
+    for g in groups.into_values() {
+        let total: i64 = g.iter().map(|&i| i64::from(st[i].3 - st[i].2)).sum();
+        if total <= run {
+            continue;
+        }
+        let rect = g.iter().map(|&i| {
+            let (h, line, lo, hi, _) = st[i];
+            if h { Rect { x0: lo, y0: line, x1: hi, y1: line } } else { Rect { x0: line, y0: lo, x1: line, y1: hi } }
+        }).reduce(|x, y| Rect { x0: x.x0.min(y.x0), y0: x.y0.min(y.y0), x1: x.x1.max(y.x1), y1: x.y1.max(y.y1) }).expect("a group has stretches");
+        out.push(Marker::Shape { rect, value: total });
     }
     out
 }
@@ -1104,7 +1228,7 @@ fn shape_rule(kind: &Kind, m: &Merged, layers: &[Layer], polys: &BTreeMap<Layer,
         Kind::Orthogonal { .. } => (0, off_axis(layers, polys)),
         Kind::Rectangle { .. } => (0, not_sized(m, None)),
         Kind::Size { w, h, .. } => (*w, not_sized(m, Some((*w, *h)))),
-        Kind::WideSpace { w, d, to, run, bridge, .. } => {
+        Kind::WideSpace { w, d, to, run, bridge, jog, .. } => {
             let a = wide_part(m, *w);
             let other;
             let b: &Merged = match to {
@@ -1114,8 +1238,8 @@ fn shape_rule(kind: &Kind, m: &Merged, layers: &[Layer], polys: &BTreeMap<Layer,
                 }
                 None => m,
             };
-            if *bridge != Bridge::None {
-                (*d, bridged_pairs(&a, b, m, *d, *run, *bridge))
+            if *bridge != Bridge::None || jog.is_some() {
+                (*d, bridged_pairs(&a, b, m, *d, *run, *bridge, *jog))
             } else {
                 (*d, ext_pairs(&a.edges(), &b.edges(), *d, &a, b, Some(*run)))
             }
@@ -1673,6 +1797,35 @@ mod tests {
         let beyond = "widespace W 1/1 120 56 to=120 bridge run=80";
         assert_eq!(count(beyond, vec![b1.clone(), b2.clone(), neck.clone()]), 1, "no part beyond: no bridge");
         assert!(parse("widespace W 1/1 120 56 bridge bridge2").is_err(), "one bridge option");
+    }
+
+    /// Rule (widespace jog): pieces are summed along a line and across a short step with one
+    /// convex end; a cluster longer than `run` is one result (each side of the gap its own).
+    #[test]
+    fn a_run_is_summed_across_short_steps() {
+        let wide = bx(1, 1, 0, 0, 1000, 200);
+        let w1 = bx(1, 1, 0, 250, 200, 290);
+        let w2 = bx(1, 1, 200, 260, 400, 300); // a 10 step up at x=200, one polygon with w1
+        let r = "widespace W 1/1 160 70 run=250 jog=70";
+        assert_eq!(count(r, vec![wide.clone(), w1.clone()]), 0, "a run of 200");
+        assert_eq!(count(r, vec![wide.clone(), w1.clone(), w2.clone()]), 2, "200 + 200 on each side");
+        let short = "widespace W 1/1 160 70 run=250 jog=8";
+        assert_eq!(count(short, vec![wide.clone(), w1.clone(), w2.clone()]), 1, "the step is longer than 8: only the wide side's line sums");
+        // two wires apart (not one polygon): no step joins them
+        let w2b = bx(1, 1, 210, 260, 400, 300);
+        assert_eq!(count(r, vec![wide.clone(), w1.clone(), w2b]), 0, "apart: 200 and 190, and the wide side's pieces do not meet either");
+        // a bump down: each side has one convex and one concave end, so both are steps and the
+        // neighbour's line sums through the bump (190 + 20 + 190); the wide side's line sums too
+        let bump = vec![wide.clone(), bx(1, 1, 0, 260, 400, 300), bx(1, 1, 190, 250, 210, 260)];
+        assert_eq!(count(r, bump.clone()), 2, "joined through the bump");
+        assert_eq!(count(short, bump), 1, "steps longer than the jog: the neighbour's pieces stay apart");
+        // the step is exactly the jog: joined; a run exactly the limit is not longer
+        assert_eq!(count("widespace W 1/1 160 70 run=250 jog=10", vec![wide.clone(), w1.clone(), w2.clone()]), 2, "jog 10");
+        assert_eq!(count("widespace W 1/1 160 70 run=200 jog=70", vec![wide.clone(), w1.clone()]), 0, "run 200 is not more than 200");
+        // a wire between two wide parts: its ends (both corners convex) are line ends, not steps,
+        // so its bottom and top pieces (200 each) stay two clusters
+        let sandwich = vec![wide.clone(), w1.clone(), bx(1, 1, 0, 340, 1000, 540)];
+        assert_eq!(count(r, sandwich), 0, "line ends do not join");
     }
 
     /// Rule (rectangle, size): a merged polygon that is not a rectangle; one that is not w by h
