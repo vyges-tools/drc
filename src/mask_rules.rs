@@ -9,7 +9,7 @@
 //! ```text
 //! # kind      name          layers + values (DB units)              options
 //! space       R.S.1_A       20/1 66                                  [exclude=L | only=L]
-//! space2      R.S.2         20/1 20/2 32
+//! space2      R.S.2         20/1 20/2 32                             [touch]
 //! eol         R.S.4_A       20/1 70 eolmax=80 adjmin=20 ext=16       [lenlt=N | lenge=N] [to=L | toeol | toeol=L] [exclude=L | only=L]
 //! oddcycle    R.colour      20/1 20/2 66
 //! stitch      R.stitch      20/1 20/2
@@ -19,6 +19,8 @@
 //! hole        R.A.4         20/1 20/2 48000
 //! shortvertex R.SE.1_A      20/1 57
 //! orthogonal  R.C.1_A       20/1
+//! rectangle   R.CF.C.1      20/53+20/54
+//! size        R.CF.LW.1     20/53 20/54 280 280
 //! notchecked  R.C.10_A      why it is not checked, free text
 //! ```
 //!
@@ -28,7 +30,9 @@
 //!   counts. Edge-to-edge external spacing, the plain same-mask spacing rule.
 //! - `space2 A B d`: the same between an edge of A and an edge of B, facing each other across
 //!   space that is in neither layer. Shapes of A and B that touch or overlap (a stitch) are not a
-//!   spacing case.
+//!   spacing case, unless `touch` is given: then each meeting is a result too (value 0).
+//! - In `space` and `space2` a layer may be a union, written `L+L...`: the rule reads the merged
+//!   union, so a union spacing counts pairs within each layer and across them.
 //! - `eol L d`: a **line end** is a boundary edge no longer than `eolmax` whose two corners are
 //!   convex and whose two neighbouring edges are at least `adjmin` long. Its window reaches `d`
 //!   outward from the edge, widened by `ext` on each side; any shape of the target in the open
@@ -58,6 +62,8 @@
 //! - `hole L... a`: an enclosed hole whose area is below `a`.
 //! - `shortvertex L... d`: a boundary vertex whose two edges are both shorter than `d`.
 //! - `orthogonal L...`: a drawn polygon edge that is neither horizontal nor vertical.
+//! - `rectangle L...`: a merged polygon (of the union) that is not a rectangle.
+//! - `size L... w h`: a merged polygon that is not a `w` by `h` rectangle, either way round.
 //! - `notchecked` states a rule the file knows of and this engine does not check, so the report
 //!   says so instead of letting silence read as clean.
 //!
@@ -95,8 +101,9 @@ pub enum EolTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
-    Space { layer: Layer, d: i64 },
-    Space2 { a: Layer, b: Layer, d: i64 },
+    Space { layers: Vec<Layer>, d: i64 },
+    /// `touch`: shapes of A and B that meet (touch or overlap) are a result too (value 0)
+    Space2 { a: Vec<Layer>, b: Vec<Layer>, d: i64, touch: bool },
     Eol { layer: Layer, d: i64, eol_max: i64, adj_min: i64, ext: i64, len_lt: Option<i64>, len_ge: Option<i64>, to: EolTarget },
     OddCycle { a: Layer, b: Layer, d: i64 },
     Stitch { a: Layer, b: Layer },
@@ -111,6 +118,8 @@ pub enum Kind {
     ShortVertex { layers: Vec<Layer>, d: i64 },
     /// An edge that is neither horizontal nor vertical (on the drawn polygons).
     Orthogonal { layers: Vec<Layer> },
+    Rectangle { layers: Vec<Layer> },
+    Size { layers: Vec<Layer>, w: i64, h: i64 },
     NotChecked { why: String },
 }
 
@@ -143,6 +152,8 @@ impl MaskRule {
             Kind::Hole { .. } => "hole",
             Kind::ShortVertex { .. } => "shortvertex",
             Kind::Orthogonal { .. } => "orthogonal",
+            Kind::Rectangle { .. } => "rectangle",
+            Kind::Size { .. } => "size",
             Kind::NotChecked { .. } => "notchecked",
         }
     }
@@ -205,15 +216,28 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
             out.push(MaskRule { name, kind: Kind::NotChecked { why }, region: Region::All });
             continue;
         }
-        let (pos, opts): (Vec<&str>, Vec<&str>) = toks[2..].iter().partition(|t| !t.contains('=') && **t != "toeol");
+        let (pos, opts): (Vec<&str>, Vec<&str>) = toks[2..].iter().partition(|t| !t.contains('=') && **t != "toeol" && **t != "touch");
         let layer = |k: usize| pos.get(k).and_then(|s| Layer::parse(s)).ok_or_else(|| err("expected a layer"));
+        // a layer, or the union of several joined by `+`
+        let lset = |k: usize| -> Result<Vec<Layer>, String> {
+            let s = pos.get(k).ok_or_else(|| err("expected a layer"))?;
+            let mut v: Vec<Layer> = s.split('+').map(|t| Layer::parse(t).ok_or_else(|| err("expected a layer"))).collect::<Result<_, _>>()?;
+            v.sort();
+            v.dedup();
+            Ok(v)
+        };
         let num = |k: usize| pos.get(k).and_then(|s| s.parse::<i64>().ok()).filter(|v| *v > 0).ok_or_else(|| err("expected a positive DB-unit value"));
         let mut region = Region::All;
         let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
         let mut toeol = false;
+        let mut touch = false;
         for o in &opts {
             if *o == "toeol" {
                 toeol = true;
+                continue;
+            }
+            if *o == "touch" {
+                touch = true;
                 continue;
             }
             let (k, v) = o.split_once('=').expect("partitioned on '='");
@@ -239,11 +263,11 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
         let rule = match kind {
             "space" => {
                 want(2)?;
-                Kind::Space { layer: layer(0)?, d: num(1)? }
+                Kind::Space { layers: lset(0)?, d: num(1)? }
             }
             "space2" => {
                 want(3)?;
-                Kind::Space2 { a: layer(0)?, b: layer(1)?, d: num(2)? }
+                Kind::Space2 { a: lset(0)?, b: lset(1)?, d: num(2)?, touch }
             }
             "oddcycle" => {
                 want(3)?;
@@ -286,15 +310,21 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
                 let min_extent = opt("minextent")?.unwrap_or(0);
                 Kind::Ratio { num, den, window, step, min, max, exempt, inside: l("inside")?, min_extent }
             }
-            "width" | "area" | "hole" | "shortvertex" | "orthogonal" => {
-                // layers (their union), then the value; `orthogonal` takes no value
-                let nv = usize::from(kind != "orthogonal");
+            "width" | "area" | "hole" | "shortvertex" | "orthogonal" | "rectangle" | "size" => {
+                // layers (their union), then the value; `orthogonal` and `rectangle` take none, `size` two
+                let nv = match kind {
+                    "orthogonal" | "rectangle" => 0,
+                    "size" => 2,
+                    _ => 1,
+                };
                 if pos.len() < 1 + nv {
                     return Err(err("wrong number of arguments"));
                 }
                 let layers: Vec<Layer> = pos[..pos.len() - nv].iter().map(|s| Layer::parse(s).ok_or_else(|| err("expected a layer"))).collect::<Result<_, _>>()?;
-                let v = if nv == 1 { num(pos.len() - 1)? } else { 0 };
+                let v = if nv >= 1 { num(pos.len() - 1)? } else { 0 };
                 match kind {
+                    "rectangle" => Kind::Rectangle { layers },
+                    "size" => Kind::Size { layers, w: num(pos.len() - 2)?, h: v },
                     "width" => Kind::Width { layers, d: v },
                     "hole" => Kind::Hole { layers, a: v },
                     "shortvertex" => Kind::ShortVertex { layers, d: v },
@@ -344,6 +374,9 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
         }
         if toeol && kind != "eol" {
             return Err(err("toeol applies to eol only"));
+        }
+        if touch && kind != "space2" {
+            return Err(err("touch applies to space2 only"));
         }
         out.push(MaskRule { name, kind: rule, region });
     }
@@ -685,10 +718,13 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
     let mut want: BTreeSet<Layer> = BTreeSet::new();
     for r in rules {
         match &r.kind {
-            Kind::Space { layer, .. } => {
-                want.insert(*layer);
+            Kind::Space { layers, .. } => {
+                want.extend(layers.iter().copied());
             }
-            Kind::Space2 { a, b, .. } | Kind::OddCycle { a, b, .. } | Kind::Stitch { a, b } => {
+            Kind::Space2 { a, b, .. } => {
+                want.extend(a.iter().chain(b).copied());
+            }
+            Kind::OddCycle { a, b, .. } | Kind::Stitch { a, b } => {
                 want.insert(*a);
                 want.insert(*b);
             }
@@ -702,7 +738,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 want.extend(num.iter().chain(den).chain(exempt).copied());
                 want.extend(inside.iter().copied());
             }
-            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Orthogonal { layers } => {
+            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } => {
                 want.extend(layers.iter().copied());
             }
             Kind::NotChecked { .. } => {}
@@ -732,6 +768,22 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
     let mut out = Vec::new();
     // unions shared between rules (a balance rule pair, min and max, reads the same two)
     let mut unions: BTreeMap<Vec<Layer>, Merged> = BTreeMap::new();
+    let union_of = |ls: &[Layer]| {
+        let v: Vec<Vec<(i32, i32)>> = ls.iter().flat_map(|l| polys.get(l).cloned().unwrap_or_default()).collect();
+        Merged::new(&v)
+    };
+    for r in rules {
+        let sets: Vec<&Vec<Layer>> = match &r.kind {
+            Kind::Space { layers, .. } => vec![layers],
+            Kind::Space2 { a, b, .. } => vec![a, b],
+            _ => vec![],
+        };
+        for ls in sets.into_iter().filter(|ls| ls.len() > 1) {
+            if !unions.contains_key(ls) {
+                unions.insert(ls.clone(), union_of(ls));
+            }
+        }
+    }
     for r in rules {
         let (limit, markers) = match &r.kind {
             Kind::NotChecked { why } => {
@@ -759,7 +811,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured, range_ppm });
                 continue;
             }
-            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Orthogonal { layers } => {
+            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } => {
                 let m: &Merged = if layers.len() > 1 {
                     unions.entry(layers.clone()).or_insert_with(|| {
                         let v: Vec<Vec<(i32, i32)>> = layers.iter().flat_map(|l| polys.get(l).cloned().unwrap_or_default()).collect();
@@ -770,14 +822,19 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 };
                 shape_rule(&r.kind, m, layers, &drawn)
             }
-            Kind::Space { layer, d } => {
-                let m = &merged[layer];
+            Kind::Space { layers, d } => {
+                let m = if layers.len() > 1 { &unions[layers] } else { &merged[&layers[0]] };
                 let e = m.edges();
                 (*d, ext_pairs(&e, &e, *d, m, m))
             }
-            Kind::Space2 { a, b, d } => {
-                let (ma, mb) = (&merged[a], &merged[b]);
-                (*d, ext_pairs(&ma.edges(), &mb.edges(), *d, ma, mb))
+            Kind::Space2 { a, b, d, touch } => {
+                let ma = if a.len() > 1 { &unions[a] } else { &merged[&a[0]] };
+                let mb = if b.len() > 1 { &unions[b] } else { &merged[&b[0]] };
+                let mut found = ext_pairs(&ma.edges(), &mb.edges(), *d, ma, mb);
+                if *touch {
+                    found.extend(stitches(ma, mb));
+                }
+                (*d, found)
             }
             Kind::OddCycle { a, b, d } => (*d, odd_cycles(&merged[a], &merged[b], *d)),
             Kind::Stitch { a, b } => (0, stitches(&merged[a], &merged[b])),
@@ -866,6 +923,8 @@ fn shape_rule(kind: &Kind, m: &Merged, layers: &[Layer], polys: &BTreeMap<Layer,
         Kind::Hole { a, .. } => (*a, small_holes(m, *a)),
         Kind::ShortVertex { d, .. } => (*d, short_vertices(m, *d)),
         Kind::Orthogonal { .. } => (0, off_axis(layers, polys)),
+        Kind::Rectangle { .. } => (0, not_sized(m, None)),
+        Kind::Size { w, h, .. } => (*w, not_sized(m, Some((*w, *h)))),
         _ => (0, Vec::new()),
     }
 }
@@ -974,6 +1033,25 @@ fn small_polygons(m: &Merged, a: i64, shape: AreaShape) -> Vec<Marker> {
             AreaShape::NotRect => !is_rect,
         };
         if keep && area < a {
+            out.push(Marker::Shape { rect: bb, value: area });
+        }
+    }
+    out
+}
+
+/// Merged polygons that are not a rectangle, or (`size`) not a `w` by `h` rectangle in either
+/// orientation. The marker is the polygon's bounding box, its value the polygon's area.
+fn not_sized(m: &Merged, size: Option<(i64, i64)>) -> Vec<Marker> {
+    let mut out = Vec::new();
+    for g in components(m) {
+        let area: i64 = g.iter().map(|&i| {
+            let t = m.tiles[i];
+            i64::from(t.x1 - t.x0) * i64::from(t.y1 - t.y0)
+        }).sum();
+        let bb = bbox_of(&g.iter().map(|&i| m.tiles[i]).collect::<Vec<_>>()).expect("a component has a tile");
+        let (bw, bh) = (i64::from(bb.x1 - bb.x0), i64::from(bb.y1 - bb.y0));
+        let ok = area == bw * bh && size.is_none_or(|(w, h)| (bw, bh) == (w, h) || (bw, bh) == (h, w));
+        if !ok {
             out.push(Marker::Shape { rect: bb, value: area });
         }
     }
@@ -1304,6 +1382,41 @@ mod tests {
         assert_eq!(count(x, vec![bx(1, 1, 0, 0, 30, 300), bx(1, 1, 0, 379, 30, 600)]), 0, "same mask");
         assert_eq!(count(x, vec![bx(1, 2, 0, 0, 30, 300), bx(1, 2, 0, 379, 30, 600)]), 0, "other mask only");
         assert_eq!(count(x, vec![bx(1, 1, 0, 0, 30, 300), bx(1, 2, -300, 340, 300, 400)]), 0, "a side of L2");
+    }
+
+    /// Rule (space and space2 on a union, `touch`): a union spacing counts pairs across its
+    /// layers; with `touch`, A meeting B is a result, without it a stitch is not spacing.
+    #[test]
+    fn union_space_and_touching_prohibited() {
+        let r = "space U 1/1+1/2 140";
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 280, 280), bx(1, 2, 419, 0, 699, 280)]), 1, "139 across the layers");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 280, 280), bx(1, 2, 420, 0, 700, 280)]), 0, "140");
+        assert_eq!(count("space U 1/1 140", vec![bx(1, 1, 0, 0, 280, 280), bx(1, 2, 419, 0, 699, 280)]), 0, "one layer alone");
+        let t = "space2 T 1/1+1/2 2/0+2/1 200 touch";
+        assert_eq!(count(t, vec![bx(1, 2, 0, 0, 280, 280), bx(2, 1, 479, 0, 600, 280)]), 1, "199");
+        assert_eq!(count(t, vec![bx(1, 2, 0, 0, 280, 280), bx(2, 1, 480, 0, 600, 280)]), 0, "200");
+        assert_eq!(count(t, vec![bx(1, 1, 0, 0, 280, 280), bx(2, 0, 280, 0, 600, 280)]), 1, "touching");
+        assert_eq!(count(t, vec![bx(1, 1, 0, 0, 280, 280), bx(2, 0, 100, 100, 200, 200)]), 1, "inside");
+        let n = "space2 T 1/1+1/2 2/0+2/1 200";
+        assert_eq!(count(n, vec![bx(1, 1, 0, 0, 280, 280), bx(2, 0, 280, 0, 600, 280)]), 0, "touching, no touch");
+        assert!(parse("space2 T 1/1 2/0 200 touch").is_ok());
+        assert!(parse("space T 1/1 200 touch").is_err());
+    }
+
+    /// Rule (rectangle, size): a merged polygon that is not a rectangle; one that is not w by h
+    /// (either way round).
+    #[test]
+    fn rectangle_and_exact_size() {
+        let l = vec![bx(1, 1, 0, 0, 280, 100), bx(1, 1, 0, 100, 100, 280)];
+        assert_eq!(count("rectangle C 1/1", l.clone()), 1, "an L");
+        assert_eq!(count("rectangle C 1/1", vec![bx(1, 1, 0, 0, 280, 100), bx(1, 1, 0, 100, 280, 280)]), 0, "two tiles, one rectangle");
+        assert_eq!(count("rectangle C 1/1 1/2", vec![bx(1, 1, 0, 0, 280, 100), bx(1, 2, 0, 100, 100, 280)]), 1, "an L across the union");
+        let z = "size S 1/1 1/2 280 140";
+        assert_eq!(count(z, vec![bx(1, 1, 0, 0, 280, 140)]), 0);
+        assert_eq!(count(z, vec![bx(1, 2, 0, 0, 140, 280)]), 0, "turned");
+        assert_eq!(count(z, vec![bx(1, 1, 0, 0, 281, 140)]), 1, "one too long");
+        assert_eq!(count(z, vec![bx(1, 1, 0, 0, 280, 139)]), 1, "one too narrow");
+        assert_eq!(count(z, l), 1, "not a rectangle");
     }
 
     /// Rule (oddcycle): three shapes each closer than d to the other two cannot be two-coloured,
