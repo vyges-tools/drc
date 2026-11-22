@@ -77,7 +77,7 @@ fill       70     30 100000 600 400   # top layer 70 to 30% per window (600-fill
 **Multi-patterning sign-off (`mask-check`).** On a double-patterned layer each mask is its own
 layer/datatype. A `.mprules` file names each rule as the foundry's deck names it and states its kind:
 `space` (one mask), `space2` (mask to mask), `eol` (line-end windows, to the same mask, the other mask
-or another line end), `oddcycle` (shapes no two-colouring can separate) and `notchecked` (stated, so
+or another line end), `oddcycle` (shapes no two-colouring can separate), `stitch` (every place the two masks meet) and `notchecked` (stated, so
 the report never reads silence as clean); `exclude=` / `only=` select a marker region. The results go
 to JSON and to an ASCII results database, one check per rule name.
 
