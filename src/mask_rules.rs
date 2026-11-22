@@ -10,7 +10,7 @@
 //! # kind      name          layers + values (DB units)              options
 //! space       R.S.1_A       20/1 66                                  [exclude=L | only=L]
 //! space2      R.S.2         20/1 20/2 32
-//! eol         R.S.4_A       20/1 70 eolmax=80 adjmin=20 ext=16       [lenlt=N | lenge=N] [to=L | toeol] [exclude=L | only=L]
+//! eol         R.S.4_A       20/1 70 eolmax=80 adjmin=20 ext=16       [lenlt=N | lenge=N] [to=L | toeol | toeol=L] [exclude=L | only=L]
 //! oddcycle    R.colour      20/1 20/2 66
 //! stitch      R.stitch      20/1 20/2
 //! ratio       R.DEN.7       20/1 / 20/1 20/2 20/0   window=25000 step=12500 min=0.2   [exempt=L,L..] [inside=L] [minextent=D]
@@ -32,8 +32,8 @@
 //! - `eol L d`: a **line end** is a boundary edge no longer than `eolmax` whose two corners are
 //!   convex and whose two neighbouring edges are at least `adjmin` long. Its window reaches `d`
 //!   outward from the edge, widened by `ext` on each side; any shape of the target in the open
-//!   window violates. The target is L itself, the layer `to=`, or (`toeol`) another line end of
-//!   L facing it, itself widened by `ext`. `lenlt` / `lenge` keep only line ends shorter than /
+//!   window violates. The target is L itself, the layer `to=`, or (`toeol`, `toeol=L2`) another line end of
+//!   L (of L2) facing it, itself widened by `ext`. `lenlt` / `lenge` keep only line ends shorter than /
 //!   at least that long.
 //! - `oddcycle A B d`: the shapes of A and B (each polygon a node; a polygon of A overlapping
 //!   one of B is a stitch, not a constraint) joined wherever two are closer than `d`; an odd
@@ -89,7 +89,8 @@ pub enum Region {
 pub enum EolTarget {
     SameLayer,
     Layer(Layer),
-    LineEnd,
+    /// a line end of the rule's layer, or (`toeol=L`) of layer L
+    LineEnd(Option<Layer>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,10 +312,11 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
             }
             "eol" => {
                 want(2)?;
-                let to = match (kv.get("to"), toeol) {
+                let toeol_l = kv.get("toeol").map(|v| Layer::parse(v).ok_or_else(|| err("bad toeol= layer"))).transpose()?;
+                let to = match (kv.get("to"), toeol || toeol_l.is_some()) {
                     (Some(_), true) => return Err(err("to= and toeol together")),
                     (Some(v), false) => EolTarget::Layer(Layer::parse(v).ok_or_else(|| err("bad to= layer"))?),
-                    (None, true) => EolTarget::LineEnd,
+                    (None, true) => EolTarget::LineEnd(toeol_l),
                     (None, false) => EolTarget::SameLayer,
                 };
                 let eol_max = opt("eolmax")?.ok_or_else(|| err("eol needs eolmax="))?;
@@ -332,7 +334,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
             _ => return Err(err("unknown rule kind")),
         };
         let allowed: &[&str] = match kind {
-            "eol" => &["eolmax", "adjmin", "ext", "lenlt", "lenge", "to"],
+            "eol" => &["eolmax", "adjmin", "ext", "lenlt", "lenge", "to", "toeol"],
             "ratio" => &["window", "step", "min", "max", "exempt", "inside", "minextent"],
             "area" => &["shape"],
             _ => &[],
@@ -692,7 +694,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
             }
             Kind::Eol { layer, to, .. } => {
                 want.insert(*layer);
-                if let EolTarget::Layer(l) = to {
+                if let EolTarget::Layer(l) | EolTarget::LineEnd(Some(l)) = to {
                     want.insert(*l);
                 }
             }
@@ -805,8 +807,8 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                             }
                         }
                     }
-                    EolTarget::LineEnd => {
-                        let all = line_ends(m, *eol_max, *adj_min);
+                    EolTarget::LineEnd(other) => {
+                        let all = line_ends(other.map_or(m, |l| &merged[&l]), *eol_max, *adj_min);
                         let mut seen = BTreeSet::new();
                         for e in &ends {
                             let w = eol_window(e, *d, *ext);
@@ -1295,6 +1297,13 @@ mod tests {
         assert_eq!(count(r, vec![bx(1, 1, 0, 0, 30, 300), bx(1, 1, -300, 340, 300, 400)]), 0, "a side, not an end");
         // a short wire above: its bottom end faces the tip (30), its top end faces away (60)
         assert_eq!(count(r, vec![bx(1, 1, 0, 0, 30, 300), bx(1, 1, 0, 330, 30, 360)]), 1);
+        // toeol=L2: an end of L facing an end of L2; ends of L alone, or of L2 alone, are not it
+        let x = "eol T 1/1 80 eolmax=40 adjmin=20 ext=32 toeol=1/2";
+        assert_eq!(count(x, vec![bx(1, 1, 0, 0, 30, 300), bx(1, 2, 0, 379, 30, 600)]), 1, "79 tip to tip across masks");
+        assert_eq!(count(x, vec![bx(1, 1, 0, 0, 30, 300), bx(1, 2, 0, 380, 30, 600)]), 0, "80");
+        assert_eq!(count(x, vec![bx(1, 1, 0, 0, 30, 300), bx(1, 1, 0, 379, 30, 600)]), 0, "same mask");
+        assert_eq!(count(x, vec![bx(1, 2, 0, 0, 30, 300), bx(1, 2, 0, 379, 30, 600)]), 0, "other mask only");
+        assert_eq!(count(x, vec![bx(1, 1, 0, 0, 30, 300), bx(1, 2, -300, 340, 300, 400)]), 0, "a side of L2");
     }
 
     /// Rule (oddcycle): three shapes each closer than d to the other two cannot be two-coloured,
