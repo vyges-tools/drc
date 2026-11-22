@@ -72,6 +72,8 @@
 //!   `jog=J`: the measured pieces are summed per cluster (pieces meeting on one line, and lines
 //!   joined by a step of the union no longer than `J` with exactly one convex end); a cluster
 //!   longer than `r` is one result (each side of the gap counts on its own).
+//! - `notch L... len side w`: a notch bottom (both corners concave) shorter than `len`, beside a
+//!   notch side shorter than `side`, with less than `w` of metal behind it (inside, side to side).
 //! - `rectangle L...`: a merged polygon (of the union) that is not a rectangle.
 //! - `size L... w h`: a merged polygon that is not a `w` by `h` rectangle, either way round.
 //! - `notchecked` states a rule the file knows of and this engine does not check, so the report
@@ -126,6 +128,9 @@ pub enum Kind {
     Hole { layers: Vec<Layer>, a: i64 },
     /// A vertex whose two edges are both shorter than `d`.
     ShortVertex { layers: Vec<Layer>, d: i64 },
+    /// A notch bottom (both corners concave) shorter than `len`, beside a notch side shorter than
+    /// `side`, with less than `w` of metal behind it (inside, side to side).
+    Notch { layers: Vec<Layer>, len: i64, side: i64, w: i64 },
     /// An edge that is neither horizontal nor vertical (on the drawn polygons).
     Orthogonal { layers: Vec<Layer> },
     Rectangle { layers: Vec<Layer> },
@@ -169,6 +174,7 @@ impl MaskRule {
             Kind::Area { .. } => "area",
             Kind::Hole { .. } => "hole",
             Kind::ShortVertex { .. } => "shortvertex",
+            Kind::Notch { .. } => "notch",
             Kind::Orthogonal { .. } => "orthogonal",
             Kind::Rectangle { .. } => "rectangle",
             Kind::Size { .. } => "size",
@@ -336,6 +342,14 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
                 };
                 let min_extent = opt("minextent")?.unwrap_or(0);
                 Kind::Ratio { num, den, window, step, min, max, exempt, inside: l("inside")?, min_extent }
+            }
+            "notch" => {
+                if pos.len() < 4 {
+                    return Err(err("wrong number of arguments"));
+                }
+                let n = pos.len();
+                let layers: Vec<Layer> = pos[..n - 3].iter().map(|s| Layer::parse(s).ok_or_else(|| err("expected a layer"))).collect::<Result<_, _>>()?;
+                Kind::Notch { layers, len: num(n - 3)?, side: num(n - 2)?, w: num(n - 1)? }
             }
             "widespace" => {
                 if pos.len() < 3 {
@@ -1046,7 +1060,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 want.extend(num.iter().chain(den).chain(exempt).copied());
                 want.extend(inside.iter().copied());
             }
-            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::WideSpace { layers, .. } => {
+            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Notch { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::WideSpace { layers, .. } => {
                 want.extend(layers.iter().copied());
             }
             Kind::NotChecked { .. } => {}
@@ -1119,7 +1133,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured, range_ppm });
                 continue;
             }
-            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::WideSpace { layers, .. } => {
+            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Notch { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::WideSpace { layers, .. } => {
                 let m: &Merged = if layers.len() > 1 {
                     unions.entry(layers.clone()).or_insert_with(|| {
                         let v: Vec<Vec<(i32, i32)>> = layers.iter().flat_map(|l| polys.get(l).cloned().unwrap_or_default()).collect();
@@ -1230,6 +1244,7 @@ fn shape_rule(kind: &Kind, m: &Merged, layers: &[Layer], polys: &BTreeMap<Layer,
         Kind::Area { a, shape, .. } => (*a, small_polygons(m, *a, *shape)),
         Kind::Hole { a, .. } => (*a, small_holes(m, *a)),
         Kind::ShortVertex { d, .. } => (*d, short_vertices(m, *d)),
+        Kind::Notch { len, side, w, .. } => (*w, thin_notches(m, *len, *side, *w)),
         Kind::Orthogonal { .. } => (0, off_axis(layers, polys)),
         Kind::Rectangle { .. } => (0, not_sized(m, None)),
         Kind::Size { w, h, .. } => (*w, not_sized(m, Some((*w, *h)))),
@@ -1388,6 +1403,50 @@ fn ring_area2(r: &[Edge]) -> i64 {
 }
 
 /// Holes (rings with the solid outside them) whose area is below `a`.
+/// Notch bottoms with thin metal behind: an edge whose two corners are concave (the ring turns
+/// right at both ends; metal is on its left), shorter than `len`, with a neighbouring edge (a notch
+/// side) shorter than `side`, and an edge of the same region facing it from inside, side to side,
+/// closer than `w`. One result per such edge.
+fn thin_notches(m: &Merged, len: i64, side: i64, w: i64) -> Vec<Marker> {
+    let elen = |e: &Edge| i64::from((e.b.0 - e.a.0).abs() + (e.b.1 - e.a.1).abs());
+    let cross = |e: &Edge, f: &Edge| -> i64 {
+        let (ux, uy) = (i64::from(e.b.0 - e.a.0), i64::from(e.b.1 - e.a.1));
+        let (vx, vy) = (i64::from(f.b.0 - f.a.0), i64::from(f.b.1 - f.a.1));
+        ux * vy - uy * vx
+    };
+    let all = m.edges();
+    let boxes: Vec<Rect> = all.iter().map(bbox_edge).collect();
+    let idx = RegionIndex::build(&boxes);
+    let mut out = Vec::new();
+    for ring in &m.rings {
+        let n = ring.len();
+        for i in 0..n {
+            let (p, e, q) = (&ring[(i + n - 1) % n], &ring[i], &ring[(i + 1) % n]);
+            if cross(p, e) >= 0 || cross(e, q) >= 0 || elen(e) >= len || elen(p).min(elen(q)) >= side {
+                continue;
+            }
+            // the metal behind: a parallel edge in projection, facing it through metal
+            let oe = outward_edge(e);
+            let behind = idx.within(&bbox_edge(e), w as i32 + 1, None).into_iter().map(|j| &all[j as usize]).filter_map(|f| {
+                if f.axis() != e.axis() || !projecting_edges(e, f) {
+                    return None;
+                }
+                let (re, rf) = (bbox_edge(e), bbox_edge(f));
+                // only the offset across the edges counts
+                let (dx, dy) = if e.axis() == Axis::Horizontal { (0, i64::from(rf.y0 - re.y0)) } else { (i64::from(rf.x0 - re.x0), 0) };
+                let gap = dx.abs() + dy.abs();
+                // f lies against e's outward normal (inside the metal), and faces back at e
+                let of = outward_edge(f);
+                (gap > 0 && gap < w && oe.0 * dx + oe.1 * dy < 0 && of.0 * dx + of.1 * dy > 0).then_some(gap)
+            }).min();
+            if let Some(g) = behind {
+                out.push(Marker::Shape { rect: bbox_edge(e), value: g });
+            }
+        }
+    }
+    out
+}
+
 fn small_holes(m: &Merged, a: i64) -> Vec<Marker> {
     let mut out = Vec::new();
     for r in &m.rings {
@@ -1835,6 +1894,50 @@ mod tests {
         // so its bottom and top pieces (200 each) stay two clusters
         let sandwich = vec![wide.clone(), w1.clone(), bx(1, 1, 0, 340, 1000, 540)];
         assert_eq!(count(r, sandwich), 0, "line ends do not join");
+    }
+
+    /// Rule (notch): a short notch bottom with thin metal behind it. The notch is cut into a bar
+    /// from above; the bar under the notch is the metal behind.
+    #[test]
+    fn a_short_notch_over_thin_metal() {
+        // a bar 0..400 x 0..100 with a notch 180..220 cut from the top down to y=40: 40 of metal
+        // behind, a bottom 40 long, sides 60 long
+        let notched = vec![bx(1, 1, 0, 0, 180, 100), bx(1, 1, 180, 0, 220, 40), bx(1, 1, 220, 0, 400, 100)];
+        let r = "notch W 1/1 80 120 44";
+        assert_eq!(count(r, notched.clone()), 1, "40 behind");
+        assert_eq!(count("notch W 1/1 80 120 40", notched.clone()), 0, "40 is not less than 40");
+        assert_eq!(count("notch W 1/1 40 120 44", notched.clone()), 0, "the bottom is 40, not shorter than 40");
+        assert_eq!(count("notch W 1/1 80 60 44", notched.clone()), 0, "the sides are 60, not shorter than 60");
+        assert_eq!(count("notch W 1/1 80 61 44", notched.clone()), 1, "sides shorter than 61");
+        let deep = vec![bx(1, 1, 0, 0, 180, 100), bx(1, 1, 180, 0, 220, 50), bx(1, 1, 220, 0, 400, 100)];
+        assert_eq!(count(r, deep), 0, "50 behind is not thin");
+        // a short shelf (its top has one concave end) is no notch bottom, though 40 lies under it
+        let shelf = vec![bx(1, 1, 0, 0, 200, 100), bx(1, 1, 200, 0, 240, 40)];
+        assert_eq!(count(r, shelf), 0, "a shelf");
+        // one side long, the other short: a side shorter than 120 is enough
+        let lop = vec![bx(1, 1, 0, 0, 180, 200), bx(1, 1, 180, 0, 220, 40), bx(1, 1, 220, 0, 400, 100)];
+        assert_eq!(count(r, lop), 1, "sides 160 and 60");
+        // a floating piece inside a notch with thick metal behind is outside, not behind
+        let float = vec![bx(1, 1, 0, 0, 180, 100), bx(1, 1, 180, 0, 220, 50), bx(1, 1, 220, 0, 400, 100), bx(1, 1, 190, 60, 210, 70)];
+        assert_eq!(count(r, float), 0, "the floating piece lies outside the metal");
+        let mirrored = vec![bx(1, 1, 0, 0, 200, 100), bx(1, 1, -40, 0, 0, 40)];
+        assert_eq!(count(r, mirrored), 0, "a shelf on the other side");
+        // 50 under the notch, and a slot cut from below beside it leaving 30: not under the notch
+        let aside = vec![
+            bx(1, 1, 0, 0, 100, 100),
+            bx(1, 1, 100, 10, 170, 100),
+            bx(1, 1, 170, 0, 180, 100),
+            bx(1, 1, 180, 0, 220, 50),
+            bx(1, 1, 220, 0, 400, 100),
+        ];
+        assert_eq!(count(r, aside), 0, "thin metal beside, not behind");
+        // metal over the notch mouth is outside, not behind
+        let mut lid = notched.clone();
+        lid.push(bx(1, 1, 0, 130, 400, 160));
+        assert_eq!(count(r, lid), 1, "the bar under the notch, not the wire over it");
+        let mut close = notched.clone();
+        close.push(bx(1, 1, 0, 110, 400, 140)); // 10 over the mouth: still outside
+        assert_eq!(count("notch W 1/1 80 120 41", close), 1, "outside metal 70 away from the bottom is not behind; 40 is");
     }
 
     /// Rule (rectangle, size): a merged polygon that is not a rectangle; one that is not w by h
