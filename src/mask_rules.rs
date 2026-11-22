@@ -13,6 +13,7 @@
 //! eol         R.S.4_A       20/1 70 eolmax=80 adjmin=20 ext=16       [lenlt=N | lenge=N] [to=L | toeol] [exclude=L | only=L]
 //! oddcycle    R.colour      20/1 20/2 66
 //! stitch      R.stitch      20/1 20/2
+//! ratio       R.DEN.7       20/1 / 20/1 20/2 20/0   window=25000 step=12500 min=0.2   [exempt=L] [inside=L]
 //! notchecked  R.C.10_A      why it is not checked, free text
 //! ```
 //!
@@ -34,6 +35,13 @@
 //!   cycle cannot be two-coloured by any assignment. Each odd cycle found is one result.
 //! - `stitch A B`: every place the two masks meet (overlap or abut). A stitch is legal only
 //!   under the deck's stitch rules; this lists each one so none passes unseen.
+//! - `ratio NUM... / DEN...`: colour balance. Over windows `window` square, stepped by `step`
+//!   from the extent's lower left, the last row and column backed up to end on the extent (an
+//!   extent smaller than a window is one window), the area of the union of the NUM layers divided
+//!   by the area of the union of the DEN layers is below `min=` (or above `max=`). A window with
+//!   no DEN area, or touching the `exempt=` layer, is not measured. The extent is the bounding box
+//!   of the `inside=` layer, else of the whole layout. Each failing window is one result, its
+//!   ratio in parts per million.
 //! - `exclude=L` drops a result whose shapes both lie in layer L (touch it); `only=L` keeps only
 //!   those. A region marker, read by interaction.
 //! - `notchecked` states a rule the file knows of and this engine does not check, so the report
@@ -77,6 +85,7 @@ pub enum Kind {
     Eol { layer: Layer, d: i64, eol_max: i64, adj_min: i64, ext: i64, len_lt: Option<i64>, len_ge: Option<i64>, to: EolTarget },
     OddCycle { a: Layer, b: Layer, d: i64 },
     Stitch { a: Layer, b: Layer },
+    Ratio { num: Vec<Layer>, den: Vec<Layer>, window: i64, step: i64, min: Option<i64>, max: Option<i64>, exempt: Option<Layer>, inside: Option<Layer> },
     NotChecked { why: String },
 }
 
@@ -95,6 +104,7 @@ impl MaskRule {
             Kind::Eol { .. } => "eol",
             Kind::OddCycle { .. } => "oddcycle",
             Kind::Stitch { .. } => "stitch",
+            Kind::Ratio { .. } => "ratio",
             Kind::NotChecked { .. } => "notchecked",
         }
     }
@@ -107,6 +117,8 @@ pub enum Marker {
     Edges { a: [i32; 4], b: [i32; 4], value: i64 },
     /// The bounding boxes of the polygons of one odd cycle, in cycle order.
     Cycle { boxes: Vec<Rect> },
+    /// A window and its ratio, parts per million.
+    Window { rect: Rect, ppm: i64 },
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +130,9 @@ pub struct RuleResult {
     pub checked: bool,
     pub why_not: Option<String>,
     pub markers: Vec<Marker>,
+    /// What the rule measured (windows for `ratio`, else 0): a clean `ratio` that measured no
+    /// window is vacuous.
+    pub measured: usize,
 }
 
 /// Parse a rule file. Every line is a rule or a comment (`#`); anything else is an error with
@@ -195,6 +210,34 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
                 want(2)?;
                 Kind::Stitch { a: layer(0)?, b: layer(1)? }
             }
+            "ratio" => {
+                let slash = pos.iter().position(|t| *t == "/").ok_or_else(|| err("ratio needs NUM... / DEN..."))?;
+                let lay = |v: &[&str]| -> Result<Vec<Layer>, String> {
+                    v.iter().map(|s| Layer::parse(s).ok_or_else(|| err("expected a layer"))).collect()
+                };
+                let (num, den) = (lay(&pos[..slash])?, lay(&pos[slash + 1..])?);
+                if num.is_empty() || den.is_empty() {
+                    return Err(err("ratio needs a layer on each side of /"));
+                }
+                // the bound is held in parts per million so the comparison is exact integer arithmetic
+                let frac = |k: &str| -> Result<Option<i64>, String> {
+                    kv.get(k)
+                        .map(|v| {
+                            v.parse::<f64>().ok().filter(|x| (0.0..=1.0).contains(x)).map(|x| (x * 1e6).round() as i64).ok_or_else(|| err("min=/max= is a fraction 0..1"))
+                        })
+                        .transpose()
+                };
+                let (min, max) = (frac("min")?, frac("max")?);
+                if min.is_some() == max.is_some() {
+                    return Err(err("ratio takes one of min= or max="));
+                }
+                let window = opt("window")?.filter(|v| *v > 0).ok_or_else(|| err("ratio needs window= > 0"))?;
+                let step = opt("step")?.filter(|v| *v > 0).ok_or_else(|| err("ratio needs step= > 0"))?;
+                let l = |k: &str| -> Result<Option<Layer>, String> {
+                    kv.get(k).map(|v| Layer::parse(v).ok_or_else(|| err("bad layer option"))).transpose()
+                };
+                Kind::Ratio { num, den, window, step, min, max, exempt: l("exempt")?, inside: l("inside")? }
+            }
             "eol" => {
                 want(2)?;
                 let to = match (kv.get("to"), toeol) {
@@ -217,7 +260,11 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
             }
             _ => return Err(err("unknown rule kind")),
         };
-        let allowed: &[&str] = if kind == "eol" { &["eolmax", "adjmin", "ext", "lenlt", "lenge", "to"] } else { &[] };
+        let allowed: &[&str] = match kind {
+            "eol" => &["eolmax", "adjmin", "ext", "lenlt", "lenge", "to"],
+            "ratio" => &["window", "step", "min", "max", "exempt", "inside"],
+            _ => &[],
+        };
         if let Some(k) = kv.keys().find(|k| !allowed.contains(k)) {
             return Err(err(&format!("option {k}= does not apply")));
         }
@@ -577,6 +624,10 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                     want.insert(*l);
                 }
             }
+            Kind::Ratio { num, den, exempt, inside, .. } => {
+                want.extend(num.iter().chain(den).copied());
+                want.extend(exempt.iter().chain(inside).copied());
+            }
             Kind::NotChecked { .. } => {}
         }
         if let Region::Exclude(l) | Region::Only(l) = r.region {
@@ -595,7 +646,25 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
     for r in rules {
         let (limit, markers) = match &r.kind {
             Kind::NotChecked { why } => {
-                out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit: 0, checked: false, why_not: Some(why.clone()), markers: vec![] });
+                out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit: 0, checked: false, why_not: Some(why.clone()), markers: vec![], measured: 0 });
+                continue;
+            }
+            Kind::Ratio { num, den, window, step, min, max, exempt, inside } => {
+                let union = |ls: &[Layer]| -> Merged {
+                    let v: Vec<Vec<(i32, i32)>> = ls.iter().flat_map(|l| polys.get(l).cloned().unwrap_or_default()).collect();
+                    Merged::new(&v)
+                };
+                let (mn, md) = (union(num), union(den));
+                let ext = match inside {
+                    Some(l) => bbox_of(&merged[l].tiles),
+                    None => cell_bbox(&cell),
+                };
+                let (markers, measured) = match ext {
+                    None => (Vec::new(), 0),
+                    Some(ext) => ratio_windows(&mn, &md, exempt.map(|l| &merged[&l]), ext, *window, *step, *min, *max),
+                };
+                let limit = min.or(*max).unwrap_or(0);
+                out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured });
                 continue;
             }
             Kind::Space { layer, d } => {
@@ -673,15 +742,85 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                         let inside = match mk {
                             Marker::Edges { a, b, .. } => m.touches(&seg_box(a)) && m.touches(&seg_box(b)),
                             Marker::Cycle { boxes } => boxes.iter().all(|b| m.touches(b)),
+                            Marker::Window { rect, .. } => m.touches(rect),
                         };
                         inside == keep_inside
                     })
                     .collect()
             }
         };
-        out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers });
+        out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured: 0 });
     }
     Ok(out)
+}
+
+fn bbox_of(tiles: &[Rect]) -> Option<Rect> {
+    tiles.iter().copied().reduce(|a, b| Rect { x0: a.x0.min(b.x0), y0: a.y0.min(b.y0), x1: a.x1.max(b.x1), y1: a.y1.max(b.y1) })
+}
+
+fn cell_bbox(cell: &crate::layout::gds::Cell) -> Option<Rect> {
+    let pts: Vec<(i32, i32)> = cell.elements.iter().filter_map(|e| elem_poly(e).1).flatten().collect();
+    let (x0, x1) = (pts.iter().map(|p| p.0).min()?, pts.iter().map(|p| p.0).max()?);
+    let (y0, y1) = (pts.iter().map(|p| p.1).min()?, pts.iter().map(|p| p.1).max()?);
+    Some(Rect { x0, y0, x1, y1 })
+}
+
+/// Window origins along one axis: `lo`, `lo + step`, … while the window fits, then one more
+/// backed up to end at `hi` if the last did not; a single window when the span is shorter.
+pub(crate) fn window_starts(lo: i32, hi: i32, window: i64, step: i64) -> Vec<(i32, i32)> {
+    let span = i64::from(hi) - i64::from(lo);
+    if span <= window {
+        return vec![(lo, hi)];
+    }
+    let mut v = Vec::new();
+    let mut x = i64::from(lo);
+    while x + window <= i64::from(hi) {
+        v.push((x as i32, (x + window) as i32));
+        x += step;
+    }
+    if v.last().is_some_and(|l| l.1 < hi) {
+        v.push(((i64::from(hi) - window) as i32, hi));
+    }
+    v
+}
+
+/// Area of a merged region inside window `w`.
+fn area_in(m: &Merged, w: &Rect) -> i64 {
+    m.idx
+        .overlaps(w)
+        .into_iter()
+        .map(|i| {
+            let t = m.tiles[i as usize];
+            let dx = i64::from(t.x1.min(w.x1)) - i64::from(t.x0.max(w.x0));
+            let dy = i64::from(t.y1.min(w.y1)) - i64::from(t.y0.max(w.y0));
+            if dx > 0 && dy > 0 { dx * dy } else { 0 }
+        })
+        .sum()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ratio_windows(num: &Merged, den: &Merged, exempt: Option<&Merged>, ext: Rect, window: i64, step: i64, min: Option<i64>, max: Option<i64>) -> (Vec<Marker>, usize) {
+    let mut out = Vec::new();
+    let mut measured = 0;
+    for (y0, y1) in window_starts(ext.y0, ext.y1, window, step) {
+        for (x0, x1) in window_starts(ext.x0, ext.x1, window, step) {
+            let w = Rect { x0, y0, x1, y1 };
+            if exempt.is_some_and(|e| e.touches(&w)) {
+                continue;
+            }
+            let d = area_in(den, &w);
+            if d == 0 {
+                continue;
+            }
+            measured += 1;
+            // num/den < m/1e6, exact: num*1e6 < m*den (i128: areas reach 1e18 on a large die)
+            let (n, d) = (i128::from(area_in(num, &w)) * 1_000_000, i128::from(d));
+            if min.is_some_and(|m| n < i128::from(m) * d) || max.is_some_and(|m| n > i128::from(m) * d) {
+                out.push(Marker::Window { rect: w, ppm: (n / d) as i64 });
+            }
+        }
+    }
+    (out, measured)
 }
 
 /// The results in the ASCII results-database layout: a header line (`top precision`), then per
@@ -700,6 +839,10 @@ pub fn write_rdb(results: &[RuleResult], top: &str, precision: u32) -> String {
                 Marker::Edges { a, b, .. } => {
                     k += 1;
                     s.push_str(&format!("e {k} 2\n{} {} {} {}\n{} {} {} {}\n", a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]));
+                }
+                Marker::Window { rect: b, .. } => {
+                    k += 1;
+                    s.push_str(&format!("p {k} 4\n{} {}\n{} {}\n{} {}\n{} {}\n", b.x0, b.y0, b.x1, b.y0, b.x1, b.y1, b.x0, b.y1));
                 }
                 Marker::Cycle { boxes } => {
                     k += 1;
@@ -877,4 +1020,89 @@ mod tests {
         assert_eq!(lines.len(), 7);
         assert!(!db.contains("\nN\n"));
     }
+
+    /// Window placement (the deck's `WINDOW w STEP s BACKUP`): origins step by s from the lower
+    /// left while the window fits; if the last does not end on the extent, one more window is
+    /// backed up to end there; an extent shorter than a window is one window over the extent.
+    #[test]
+    fn ratio_windows_step_then_back_up() {
+        assert_eq!(window_starts(0, 100, 100, 50), vec![(0, 100)]);
+        assert_eq!(window_starts(0, 60, 100, 50), vec![(0, 60)], "shorter than a window");
+        assert_eq!(window_starts(0, 200, 100, 50), vec![(0, 100), (50, 150), (100, 200)]);
+        assert_eq!(window_starts(0, 230, 100, 50), vec![(0, 100), (50, 150), (100, 200), (130, 230)], "backed up");
+        assert_eq!(window_starts(10, 210, 100, 100), vec![(10, 110), (110, 210)]);
+    }
+
+    /// Rule (ratio): area(union NUM) / area(union DEN) per window, compared exactly; at the bound
+    /// is clean, below it (min=) or above it (max=) is one result per window; a window with no
+    /// DEN area is not measured.
+    #[test]
+    fn ratio_is_colour_balance_per_window() {
+        let min = "ratio B 1/1 / 1/1 1/2 window=100 step=50 min=0.2";
+        let max = "ratio B 1/1 / 1/1 1/2 window=100 step=50 max=0.8";
+        // E1 area 1000, E2 4000: exactly 0.2
+        let at = vec![bx(1, 1, 0, 0, 100, 10), bx(1, 2, 0, 20, 100, 60)];
+        assert_eq!(count(min, at.clone()), 0, "at the bound");
+        let below = vec![bx(1, 1, 0, 0, 99, 10), bx(1, 2, 0, 20, 100, 60)];
+        assert_eq!(count(min, below.clone()), 1, "990/4990 < 0.2");
+        assert_eq!(count(max, below), 0);
+        // E1 4000, E2 1000: exactly 0.8, then above it
+        assert_eq!(count(max, vec![bx(1, 1, 0, 20, 100, 60), bx(1, 2, 0, 0, 100, 10)]), 0);
+        assert_eq!(count(max, vec![bx(1, 1, 0, 20, 100, 61), bx(1, 2, 0, 0, 100, 10)]), 1);
+        // an overlap counts once in each union: E1 over E2 entirely is ratio 1
+        assert_eq!(count(max, vec![bx(1, 1, 0, 0, 100, 10), bx(1, 2, 0, 0, 100, 10)]), 1);
+        // three windows across x (0, 50, 100): the left is balanced, the middle and right hold
+        // only E2 (ratio 0)
+        let two = vec![bx(1, 1, 0, 0, 50, 50), bx(1, 2, 50, 0, 100, 50), bx(1, 2, 150, 0, 200, 50)];
+        let r = check(&lib(two), None, &parse(min).unwrap()).unwrap();
+        assert_eq!(r[0].measured, 3);
+        let w = |x0| Marker::Window { rect: Rect { x0, y0: 0, x1: x0 + 100, y1: 50 }, ppm: 0 };
+        assert_eq!(r[0].markers, vec![w(50), w(100)]);
+        // only NUM-free, DEN-free windows: nothing measured, so a clean count is vacuous
+        let r = check(&lib(vec![bx(2, 0, 0, 0, 10, 10)]), None, &parse(min).unwrap()).unwrap();
+        assert_eq!((r[0].measured, r[0].markers.len()), (0, 0));
+    }
+
+    /// Rule (ratio): a window touching the exempt layer is not measured; `inside=` sets the
+    /// extent the windows tile.
+    #[test]
+    fn ratio_exempt_and_inside() {
+        let below = vec![bx(1, 1, 0, 0, 99, 10), bx(1, 2, 0, 20, 100, 60)];
+        let mut ex = below.clone();
+        ex.push(bx(9, 0, 90, 90, 95, 95));
+        assert_eq!(count("ratio B 1/1 / 1/1 1/2 window=100 step=50 min=0.2 exempt=9/0", ex), 0);
+        let mut far = below.clone();
+        far.push(bx(9, 0, 300, 300, 310, 310));
+        // inside= limits the extent to 0..100: one window, the far exempt shape does not touch it
+        assert_eq!(count("ratio B 1/1 / 1/1 1/2 window=100 step=50 min=0.2 exempt=9/0 inside=8/0", {
+            let mut v = far.clone();
+            v.push(bx(8, 0, 0, 0, 100, 100));
+            v
+        }), 1);
+        // a guard layer far from the metal: windows inside it hold no DEN area
+        let mut g = below;
+        g.push(bx(8, 0, 1000, 1000, 1100, 1100));
+        let r = check(&lib(g), None, &parse("ratio B 1/1 / 1/1 1/2 window=100 step=50 min=0.2 inside=8/0").unwrap()).unwrap();
+        assert_eq!((r[0].measured, r[0].markers.len()), (0, 0));
+    }
+
+    #[test]
+    fn ratio_parse_errors() {
+        for bad in [
+            "ratio B 1/1 1/2 window=100 step=50 min=0.2",
+            "ratio B / 1/2 window=100 step=50 min=0.2",
+            "ratio B 1/1 / window=100 step=50 min=0.2",
+            "ratio B 1/1 / 1/2 window=100 step=50",
+            "ratio B 1/1 / 1/2 window=100 step=50 min=0.2 max=0.8",
+            "ratio B 1/1 / 1/2 window=100 step=50 min=1.5",
+            "ratio B 1/1 / 1/2 step=50 min=0.2",
+            "ratio B 1/1 / 1/2 window=100 min=0.2",
+            "ratio B 1/1 / 1/2 window=100 step=50 min=0.2 eolmax=3",
+            "space S 1/1 60 min=0.2",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        assert!(parse("ratio B 1/1 / 1/1 1/2 window=100 step=50 max=0.8 exempt=9/0 inside=8/0").is_ok());
+    }
+
 }
