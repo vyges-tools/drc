@@ -560,7 +560,9 @@ fn bridged_pairs(a: &Merged, b: &Merged, m: &Merged, d: i64, run: i64, mode: Bri
             } else {
                 Rect { x0: pa.min(pb), y0: lo, x1: pa.max(pb), y1: hi }
             };
-            let inside = Merged::from_tiles(&boolean::boolean(&m.tiles, &[g], Op::And));
+            // only the tiles near the gap: the index, not the whole union, per pair
+            let near: Vec<Rect> = m.idx.overlaps(&grown(&g, 1)).into_iter().map(|i| m.tiles[i as usize]).collect();
+            let inside = Merged::from_tiles(&boolean::boolean(&near, &[g], Op::And));
             let mut cut: Vec<(i32, i32)> = Vec::new();
             for comp in components(&inside) {
                 let t: Vec<Rect> = comp.iter().map(|&i| inside.tiles[i]).collect();
