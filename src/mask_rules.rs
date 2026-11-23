@@ -55,6 +55,8 @@
 //!   per million.
 //! - `exclude=L` drops a result whose shapes both lie in layer L (touch it); `only=L` keeps only
 //!   those. A region marker, read by interaction.
+//! - `maxwidth L... w`: the part of the union wider than `w` (an opening by a `w` square, as
+//!   `widespace` takes it): each of its polygons is one result (the maximum width).
 //! - `width L... d`: over the union of the layers, two boundary edges of one polygon facing each
 //!   other across its inside (side to side), closer than `d`, the rectangle between them wholly
 //!   inside: the minimum width.
@@ -145,6 +147,8 @@ pub enum Kind {
     Orthogonal { layers: Vec<Layer> },
     Rectangle { layers: Vec<Layer> },
     Size { layers: Vec<Layer>, w: i64, h: i64 },
+    /// The part of the union wider than `w` (an opening by a `w` square): the maximum width.
+    MaxWidth { layers: Vec<Layer>, w: i64 },
     /// The wide part (width > `w`) of the union facing the union (or, `to=`, its part wider than
     /// `to`) across space closer than `d`, side to side only, run length above `run`.
     /// `bridge`: the run over metal that touches both the wide part and the other side's part
@@ -195,6 +199,7 @@ impl MaskRule {
             Kind::Orthogonal { .. } => "orthogonal",
             Kind::Rectangle { .. } => "rectangle",
             Kind::Size { .. } => "size",
+            Kind::MaxWidth { .. } => "maxwidth",
             Kind::WideSpace { .. } => "widespace",
             Kind::Joint { .. } => "joint",
             Kind::Sandwich { .. } => "sandwich",
@@ -398,7 +403,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
                 let layers: Vec<Layer> = pos[..n - 5].iter().map(|s| Layer::parse(s).ok_or_else(|| err("expected a layer"))).collect::<Result<_, _>>()?;
                 Kind::Joint { layers, w: num(n - 5)?, len: num(n - 4)?, eol: num(n - 3)?, adj: num(n - 2)?, d: num(n - 1)? }
             }
-            "width" | "area" | "hole" | "shortvertex" | "orthogonal" | "rectangle" | "size" => {
+            "width" | "area" | "hole" | "shortvertex" | "orthogonal" | "rectangle" | "size" | "maxwidth" => {
                 // layers (their union), then the value; `orthogonal` and `rectangle` take none, `size` two
                 let nv = match kind {
                     "orthogonal" | "rectangle" => 0,
@@ -414,6 +419,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
                     "rectangle" => Kind::Rectangle { layers },
                     "size" => Kind::Size { layers, w: num(pos.len() - 2)?, h: v },
                     "width" => Kind::Width { layers, d: v },
+                    "maxwidth" => Kind::MaxWidth { layers, w: v },
                     "hole" => Kind::Hole { layers, a: v },
                     "shortvertex" => Kind::ShortVertex { layers, d: v },
                     "orthogonal" => Kind::Orthogonal { layers },
@@ -1095,7 +1101,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 want.extend(num.iter().chain(den).chain(exempt).copied());
                 want.extend(inside.iter().copied());
             }
-            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Notch { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::WideSpace { layers, .. } | Kind::Joint { layers, .. } => {
+            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Notch { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::MaxWidth { layers, .. } | Kind::WideSpace { layers, .. } | Kind::Joint { layers, .. } => {
                 want.extend(layers.iter().copied());
             }
             Kind::NotChecked { .. } => {}
@@ -1168,7 +1174,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 out.push(RuleResult { name: r.name.clone(), kind: r.kind_name(), limit, checked: true, why_not: None, markers, measured, range_ppm });
                 continue;
             }
-            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Notch { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::WideSpace { layers, .. } | Kind::Joint { layers, .. } => {
+            Kind::Width { layers, .. } | Kind::Area { layers, .. } | Kind::Hole { layers, .. } | Kind::ShortVertex { layers, .. } | Kind::Notch { layers, .. } | Kind::Orthogonal { layers } | Kind::Rectangle { layers } | Kind::Size { layers, .. } | Kind::MaxWidth { layers, .. } | Kind::WideSpace { layers, .. } | Kind::Joint { layers, .. } => {
                 let m: &Merged = if layers.len() > 1 {
                     unions.entry(layers.clone()).or_insert_with(|| {
                         let v: Vec<Vec<(i32, i32)>> = layers.iter().flat_map(|l| polys.get(l).cloned().unwrap_or_default()).collect();
@@ -1284,6 +1290,7 @@ fn shape_rule(kind: &Kind, m: &Merged, layers: &[Layer], polys: &BTreeMap<Layer,
         Kind::Orthogonal { .. } => (0, off_axis(layers, polys)),
         Kind::Rectangle { .. } => (0, not_sized(m, None)),
         Kind::Size { w, h, .. } => (*w, not_sized(m, Some((*w, *h)))),
+        Kind::MaxWidth { w, .. } => (*w, wide_polygons(m, *w)),
         Kind::Joint { w, len, eol, adj, d, .. } => (*d, joint_space(m, *w, *len, *eol, *adj, *d)),
         Kind::WideSpace { w, d, to, run, bridge, jog, .. } => {
             let a = wide_part(m, *w);
@@ -1417,6 +1424,21 @@ fn small_polygons(m: &Merged, a: i64, shape: AreaShape) -> Vec<Marker> {
 
 /// Merged polygons that are not a rectangle, or (`size`) not a `w` by `h` rectangle in either
 /// orientation. The marker is the polygon's bounding box, its value the polygon's area.
+/// The maximum width: each polygon of the part of `m` wider than `w` ([`wide_part`]; a strip
+/// exactly `w` wide is not wider) is one result, its bounding box and its area. The part, not the
+/// whole polygon that has one: the result is what a `WITH WIDTH > w` selection outputs.
+fn wide_polygons(m: &Merged, w: i64) -> Vec<Marker> {
+    let a = wide_part(m, w);
+    components(&a)
+        .into_iter()
+        .map(|g| {
+            let tiles: Vec<Rect> = g.iter().map(|&i| a.tiles[i]).collect();
+            let area = tiles.iter().map(|t| i64::from(t.x1 - t.x0) * i64::from(t.y1 - t.y0)).sum();
+            Marker::Shape { rect: bbox_of(&tiles).expect("a component has a tile"), value: area }
+        })
+        .collect()
+}
+
 fn not_sized(m: &Merged, size: Option<(i64, i64)>) -> Vec<Marker> {
     let mut out = Vec::new();
     for g in components(m) {
@@ -1921,6 +1943,31 @@ mod tests {
 
     fn count(rules: &str, els: Vec<Element>) -> usize {
         run(rules, els)[0].1
+    }
+
+    /// Rule (maxwidth, `WITH WIDTH > w`): the part wider than w, one result per polygon of it, as
+    /// an opening by a w square: a strip exactly w wide is clean, one unit wider is not; a narrow arm
+    /// is not in the part; two shapes side by side make one wide polygon; the union counts.
+    #[test]
+    fn maxwidth_is_the_part_wider_than_w() {
+        let r = "maxwidth W 1/1 410";
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 3000, 410)]), 0, "410 wide");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 3000, 411)]), 1, "411 wide");
+        let shapes = |els: Vec<Element>| -> Vec<(Rect, i64)> {
+            let rs = check(&lib(els), None, &parse(r).unwrap()).unwrap();
+            rs[0].markers.iter().map(|m| match m {
+                Marker::Shape { rect, value } => (*rect, *value),
+                _ => panic!("a shape"),
+            }).collect()
+        };
+        // a 900 block with a 130-wide arm: only the block is in the part
+        assert_eq!(shapes(vec![bx(1, 1, 0, 0, 900, 900), bx(1, 1, 900, 0, 2700, 130)]), vec![(Rect { x0: 0, y0: 0, x1: 900, y1: 900 }, 810_000)]);
+        // two 230-wide strips abutting make one 460-wide polygon; apart, none
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 3000, 230), bx(1, 1, 0, 230, 3000, 460)]), 1);
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 3000, 230), bx(1, 1, 0, 231, 3000, 461)]), 0);
+        // the union of two layers, and two separate wide polygons are two results
+        assert_eq!(count("maxwidth W 1/1 1/2 410", vec![bx(1, 1, 0, 0, 3000, 230), bx(1, 2, 0, 230, 3000, 460)]), 1);
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 900, 900), bx(1, 1, 5000, 0, 5900, 900)]), 2);
     }
 
     /// Rule (width): interior width below d, side to side, over the merged shapes: two shapes
