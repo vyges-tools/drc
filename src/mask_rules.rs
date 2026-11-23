@@ -43,7 +43,8 @@
 //! - `oddcycle A B d`: the shapes of A and B (each polygon a node; a polygon of A overlapping
 //!   one of B is a stitch, not a constraint) joined wherever two are closer than `d`; an odd
 //!   cycle cannot be two-coloured by any assignment. Each odd cycle found is one result.
-//! - `stitch A B`: every place the two masks meet (overlap or abut). A stitch is legal only
+//! - `stitch A B [singular]`: every place the two masks meet (overlap or abut); `singular` also
+//!   counts two shapes meeting at a corner point only. A stitch is legal only
 //!   under the deck's stitch rules; this lists each one so none passes unseen.
 //! - `ratio NUM... / DEN...`: colour balance. Over windows `window` square, stepped by `step`
 //!   from the extent's lower left, the last row and column backed up to end on the extent (an
@@ -130,7 +131,8 @@ pub enum Kind {
     Space2 { a: Vec<Layer>, b: Vec<Layer>, d: i64, touch: bool },
     Eol { layer: Layer, d: i64, eol_max: i64, adj_min: i64, ext: i64, len_lt: Option<i64>, len_ge: Option<i64>, to: EolTarget },
     OddCycle { a: Layer, b: Layer, d: i64 },
-    Stitch { a: Layer, b: Layer },
+    /// Every place the two masks meet; `singular` also keeps a meeting at a corner point only.
+    Stitch { a: Layer, b: Layer, singular: bool },
     Ratio { num: Vec<Layer>, den: Vec<Layer>, window: i64, step: i64, min: Option<i64>, max: Option<i64>, exempt: Vec<Layer>, inside: Option<Layer>, min_extent: i64 },
     /// Interior width below `d` (over the union of `layers`).
     Width { layers: Vec<Layer>, d: i64 },
@@ -265,7 +267,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
             out.push(MaskRule { name, kind: Kind::NotChecked { why }, region: Region::All });
             continue;
         }
-        let (pos, opts): (Vec<&str>, Vec<&str>) = toks[2..].iter().partition(|t| !t.contains('=') && **t != "toeol" && **t != "touch" && **t != "bridge" && **t != "bridge2");
+        let (pos, opts): (Vec<&str>, Vec<&str>) = toks[2..].iter().partition(|t| !t.contains('=') && **t != "toeol" && **t != "touch" && **t != "bridge" && **t != "bridge2" && **t != "singular");
         let layer = |k: usize| pos.get(k).and_then(|s| Layer::parse(s)).ok_or_else(|| err("expected a layer"));
         // a layer, or the union of several joined by `+`
         let lset = |k: usize| -> Result<Vec<Layer>, String> {
@@ -280,6 +282,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
         let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
         let mut toeol = false;
         let mut touch = false;
+        let mut singular = false;
         let mut bridge = Bridge::None;
         for o in &opts {
             if *o == "bridge" || *o == "bridge2" {
@@ -295,6 +298,10 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
             }
             if *o == "touch" {
                 touch = true;
+                continue;
+            }
+            if *o == "singular" {
+                singular = true;
                 continue;
             }
             let (k, v) = o.split_once('=').expect("partitioned on '='");
@@ -332,7 +339,7 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
             }
             "stitch" => {
                 want(2)?;
-                Kind::Stitch { a: layer(0)?, b: layer(1)? }
+                Kind::Stitch { a: layer(0)?, b: layer(1)?, singular }
             }
             "ratio" => {
                 let slash = pos.iter().position(|t| *t == "/").ok_or_else(|| err("ratio needs NUM... / DEN..."))?;
@@ -475,6 +482,9 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
         }
         if touch && kind != "space2" {
             return Err(err("touch applies to space2 only"));
+        }
+        if singular && kind != "stitch" {
+            return Err(err("singular applies to stitch only"));
         }
         out.push(MaskRule { name, kind: rule, region });
     }
@@ -1031,15 +1041,17 @@ fn odd_cycles(ma: &Merged, mb: &Merged, d: i64) -> Vec<Marker> {
 }
 
 /// Where the two masks meet: each connected piece of A AND B (an overlap), and each abutment
-/// of an A edge on a B edge (a zero-width meeting), as one polygon result.
-fn stitches(ma: &Merged, mb: &Merged) -> Vec<Marker> {
+/// of an A edge on a B edge (a zero-width meeting), as one polygon result. With `singular`, a
+/// meeting at a corner point only (zero length both ways) counts too, as an `INTERACT ...
+/// SINGULAR ALSO` selection counts it.
+fn stitches(ma: &Merged, mb: &Merged, singular: bool) -> Vec<Marker> {
     let mut boxes: Vec<Rect> = Vec::new();
     for t in &ma.tiles {
         for j in mb.idx.within(t, 1, None) {
             let u = &mb.tiles[j as usize];
             let r = Rect { x0: t.x0.max(u.x0), y0: t.y0.max(u.y0), x1: t.x1.min(u.x1), y1: t.y1.min(u.y1) };
-            // overlap, or a shared edge of positive length
-            if r.x0 <= r.x1 && r.y0 <= r.y1 && (r.x0 < r.x1 || r.y0 < r.y1) {
+            // overlap, or a shared edge of positive length (with `singular`, a shared corner point too)
+            if r.x0 <= r.x1 && r.y0 <= r.y1 && (singular || r.x0 < r.x1 || r.y0 < r.y1) {
                 boxes.push(r);
             }
         }
@@ -1087,7 +1099,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
             Kind::Space2 { a, b, .. } => {
                 want.extend(a.iter().chain(b).copied());
             }
-            Kind::OddCycle { a, b, .. } | Kind::Stitch { a, b } | Kind::Sandwich { a, b, .. } => {
+            Kind::OddCycle { a, b, .. } | Kind::Stitch { a, b, .. } | Kind::Sandwich { a, b, .. } => {
                 want.insert(*a);
                 want.insert(*b);
             }
@@ -1195,12 +1207,12 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
                 let mb = if b.len() > 1 { &unions[b] } else { &merged[&b[0]] };
                 let mut found = ext_pairs(&ma.edges(), &mb.edges(), *d, ma, mb, None);
                 if *touch {
-                    found.extend(stitches(ma, mb));
+                    found.extend(stitches(ma, mb, false));
                 }
                 (*d, found)
             }
             Kind::OddCycle { a, b, d } => (*d, odd_cycles(&merged[a], &merged[b], *d)),
-            Kind::Stitch { a, b } => (0, stitches(&merged[a], &merged[b])),
+            Kind::Stitch { a, b, singular } => (0, stitches(&merged[a], &merged[b], *singular)),
             Kind::Sandwich { a, b, wlo, whi, s, run, dlo, dhi } => (*dlo, sandwiches(&merged[a], &merged[b], (*wlo, *whi), *s, *run, (*dlo, *dhi))),
             Kind::Eol { layer, d, eol_max, adj_min, ext, len_lt, len_ge, to } => {
                 let m = &merged[layer];
@@ -2437,6 +2449,21 @@ mod tests {
         assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 30), bx(1, 2, 100, 30, 200, 60)]), 0, "a corner only");
         // one E2 shape over two touching E1 pieces is one meeting
         assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 30), bx(1, 1, 100, 0, 200, 30), bx(1, 2, 50, 0, 150, 30)]), 1);
+    }
+
+    /// Rule (stitch singular, `A INTERACT B SINGULAR ALSO`): a meeting at a corner point only is
+    /// one result too; overlap and abut as without it; apart (one unit), none; the option is
+    /// refused on any other kind.
+    #[test]
+    fn a_singular_stitch_counts_a_corner_point() {
+        let r = "stitch M 1/1 1/2 singular";
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 30), bx(1, 2, 100, 30, 200, 60)]), 1, "a corner only");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 30), bx(1, 2, 101, 31, 200, 60)]), 0, "apart diagonally");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 30), bx(1, 2, 100, 0, 200, 30)]), 1, "abut");
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 30), bx(1, 2, 80, 0, 200, 30)]), 1, "overlap");
+        // a corner point that also abuts along an edge elsewhere of the same pair is one meeting
+        assert_eq!(count(r, vec![bx(1, 1, 0, 0, 100, 30), bx(1, 2, 100, 0, 200, 30), bx(1, 2, 100, 30, 150, 60)]), 1);
+        assert!(parse("space M 1/1 50 singular").is_err(), "singular is stitch only");
     }
 
     /// Region options: `exclude=` drops a result inside the marker, `only=` keeps only those.
