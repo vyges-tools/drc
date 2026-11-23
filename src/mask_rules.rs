@@ -1523,9 +1523,9 @@ fn joint_space(m: &Merged, w: i64, len: i64, eol: i64, adj: i64, d: i64) -> Vec<
     let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
     // joint vertices: the point, the vertex (ring, index of the edge leaving it)
     let mut joints: Vec<((i32, i32), (usize, usize))> = Vec::new();
-    // polygons that touch at a point are separate polygons, however the ring was traced
-    let rings: Vec<Vec<Edge>> = m.rings.iter().flat_map(|r| split_pinches(r)).collect();
-    for (r, ring) in rings.iter().enumerate() {
+    // shapes touching at a point are separate rings (the tracer's minimum coherence); a ring
+    // that meets itself at a point keeps each corner's own turn there
+    for (r, ring) in m.rings.iter().enumerate() {
         let n = ring.len();
         if n < 4 {
             continue;
@@ -1593,29 +1593,6 @@ fn joint_space(m: &Merged, w: i64, len: i64, eol: i64, adj: i64, d: i64) -> Vec<
         if vids.len() > 1 {
             out.push(Marker::Shape { rect: Rect { x0: p.0, y0: p.1, x1: p.0, y1: p.1 }, value: 0 });
         }
-    }
-    out
-}
-
-/// A ring that passes through one point twice (two polygons touching at a corner, traced as one)
-/// split into its loops.
-fn split_pinches(ring: &[Edge]) -> Vec<Vec<Edge>> {
-    let mut out = Vec::new();
-    let mut stack: Vec<Edge> = Vec::new();
-    let mut pos: BTreeMap<(i32, i32), usize> = BTreeMap::new();
-    for e in ring {
-        if let Some(&p) = pos.get(&e.a) {
-            let lp: Vec<Edge> = stack.drain(p..).collect();
-            for x in &lp {
-                pos.remove(&x.a);
-            }
-            out.push(lp);
-        }
-        pos.insert(e.a, stack.len());
-        stack.push(*e);
-    }
-    if !stack.is_empty() {
-        out.push(stack);
     }
     out
 }
@@ -2110,25 +2087,6 @@ mod tests {
         assert_eq!(count(&r(37, 45, 25, 47), far), 1, "joint vertices touching on one line");
         assert!(parse("joint J 1/1 37 45 62 25").is_err(), "five values");
         assert!(parse("joint J 1/1 37 45 62 25 47 singular=vertex").is_err(), "no options");
-    }
-
-    #[test]
-    fn a_ring_through_a_pinch_is_two_loops() {
-        // two squares touching at (10,10), traced as one ring through it
-        let pts = [(10, 10), (0, 10), (0, 0), (10, 0), (10, 10), (20, 10), (20, 20), (10, 20)];
-        let ring: Vec<Edge> = (0..pts.len()).map(|i| Edge { a: pts[i], b: pts[(i + 1) % pts.len()] }).collect();
-        let loops = split_pinches(&ring);
-        assert_eq!(loops.len(), 2);
-        assert!(loops.iter().all(|l| l.len() == 4 && l[0].a == l[3].b), "{loops:?}");
-        assert_eq!(split_pinches(&ring[..4]).len(), 1, "a plain ring stays one");
-        // two stairs touching at their joint vertices (45,45), traced as one ring through it:
-        // the joints are still found
-        let s = [(0, 0), (30, 0), (30, 15), (45, 15), (45, 45), (75, 45), (75, 60), (90, 60), (90, 90), (60, 90), (60, 75), (45, 75), (45, 45), (15, 45), (15, 30), (0, 30)];
-        let ring: Vec<Edge> = (0..s.len()).map(|i| Edge { a: s[i], b: s[(i + 1) % s.len()] }).collect();
-        let tiles = [Rect { x0: 0, y0: 0, x1: 30, y1: 30 }, Rect { x0: 15, y0: 15, x1: 45, y1: 45 }, Rect { x0: 45, y0: 45, x1: 75, y1: 75 }, Rect { x0: 60, y0: 60, x1: 90, y1: 90 }];
-        let mut m = Merged::from_tiles(&tiles);
-        m.rings = vec![ring];
-        assert_eq!(joint_space(&m, 37, 45, 62, 25, 47).len(), 1, "the touching joint vertices");
     }
 
     #[test]
