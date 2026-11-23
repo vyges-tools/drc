@@ -80,6 +80,10 @@
 //!   than `eol`, convex at both ends, both neighbours at least `adj`). A result is two joint
 //!   edges closer than `d` corner to corner (neither projects onto the other; Euclidean, facing
 //!   each other's outside), or two joint vertices that touch at a point (value 0).
+//! - `sandwich A B wlo whi s run dlo dhi`: a wire of A whose two sides (`wlo`..`whi` across,
+//!   inclusive) each face B no more than `s` away, and whose sides face A again `dlo`..`dhi`
+//!   away (inclusive). Every measurement is side to side with a shared run of at least `run`;
+//!   the measured parts of each edge are merged before the next step.
 //! - `rectangle L...`: a merged polygon (of the union) that is not a rectangle.
 //! - `size L... w h`: a merged polygon that is not a `w` by `h` rectangle, either way round.
 //! - `notchecked` states a rule the file knows of and this engine does not check, so the report
@@ -153,6 +157,9 @@ pub enum Kind {
     /// and no longer than `len`, reaching it, neither edge a line end of `eol`/`adj`) closer than
     /// `d` corner to corner, or joint vertices touching at a point.
     Joint { layers: Vec<Layer>, w: i64, len: i64, eol: i64, adj: i64, d: i64 },
+    /// A wire of `a` `wlo`..`whi` wide with `b` no more than `s` away on both sides, whose sides
+    /// face `a` again `dlo`..`dhi` away; each step side to side over a run of at least `run`.
+    Sandwich { a: Layer, b: Layer, wlo: i64, whi: i64, s: i64, run: i64, dlo: i64, dhi: i64 },
     NotChecked { why: String },
 }
 
@@ -190,6 +197,7 @@ impl MaskRule {
             Kind::Size { .. } => "size",
             Kind::WideSpace { .. } => "widespace",
             Kind::Joint { .. } => "joint",
+            Kind::Sandwich { .. } => "sandwich",
             Kind::NotChecked { .. } => "notchecked",
         }
     }
@@ -374,7 +382,15 @@ pub fn parse(text: &str) -> Result<Vec<MaskRule>, String> {
                 }
                 Kind::WideSpace { layers, w, d, to, run: opt("run")?.unwrap_or(0), bridge, jog: opt("jog")? }
             }
-"joint" => {
+            "sandwich" => {
+                want(8)?;
+                let (wlo, whi, s, run, dlo, dhi) = (num(2)?, num(3)?, num(4)?, num(5)?, num(6)?, num(7)?);
+                if wlo > whi || dlo > dhi {
+                    return Err(err("sandwich ranges must not be empty"));
+                }
+                Kind::Sandwich { a: layer(0)?, b: layer(1)?, wlo, whi, s, run, dlo, dhi }
+            }
+            "joint" => {
                 if pos.len() < 6 {
                     return Err(err("wrong number of arguments"));
                 }
@@ -1065,7 +1081,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
             Kind::Space2 { a, b, .. } => {
                 want.extend(a.iter().chain(b).copied());
             }
-            Kind::OddCycle { a, b, .. } | Kind::Stitch { a, b } => {
+            Kind::OddCycle { a, b, .. } | Kind::Stitch { a, b } | Kind::Sandwich { a, b, .. } => {
                 want.insert(*a);
                 want.insert(*b);
             }
@@ -1179,6 +1195,7 @@ pub fn check(lib: &Library, top: Option<&str>, rules: &[MaskRule]) -> Result<Vec
             }
             Kind::OddCycle { a, b, d } => (*d, odd_cycles(&merged[a], &merged[b], *d)),
             Kind::Stitch { a, b } => (0, stitches(&merged[a], &merged[b])),
+            Kind::Sandwich { a, b, wlo, whi, s, run, dlo, dhi } => (*dlo, sandwiches(&merged[a], &merged[b], (*wlo, *whi), *s, *run, (*dlo, *dhi))),
             Kind::Eol { layer, d, eol_max, adj_min, ext, len_lt, len_ge, to } => {
                 let m = &merged[layer];
                 let ends: Vec<Edge> = line_ends(m, *eol_max, *adj_min)
@@ -1592,6 +1609,139 @@ fn joint_space(m: &Merged, w: i64, len: i64, eol: i64, adj: i64, d: i64) -> Vec<
     for (p, vids) in at {
         if vids.len() > 1 {
             out.push(Marker::Shape { rect: Rect { x0: p.0, y0: p.1, x1: p.0, y1: p.1 }, value: 0 });
+        }
+    }
+    out
+}
+
+/// An edge (its index and itself) with its measured parts along its axis.
+type EdgeParts = (usize, Edge, Vec<(i32, i32)>);
+
+/// The edges of `from` facing `to` side to side, `lo`..`hi` away (inclusive) on their outside
+/// (`out`) or inside, over a shared run of at least `run` with one of the given parts of the
+/// edge: per edge, the measured parts (along its axis), merged.
+fn facing_parts(from: &[EdgeParts], to: &[Edge], idx: &RegionIndex, (lo, hi): (i64, i64), run: i64, out: bool) -> Vec<EdgeParts> {
+    let mut res = Vec::new();
+    for (i, e, parts) in from {
+        let oe = outward_edge(e);
+        let mut iv: Vec<(i32, i32)> = Vec::new();
+        for j in idx.within(&bbox_edge(e), hi as i32 + 1, None) {
+            let f = &to[j as usize];
+            if f.axis() != e.axis() || outward_edge(f) != (-oe.0, -oe.1) {
+                continue;
+            }
+            let gap = offset_across(e, f) * if out { 1 } else { -1 };
+            if gap <= 0 || gap < lo || gap > hi {
+                continue;
+            }
+            let (flo, fhi) = axis_span(f);
+            for &(plo, phi) in parts {
+                let (a, b) = (plo.max(flo), phi.min(fhi));
+                if b > a && i64::from(b - a) >= run {
+                    iv.push((a, b));
+                }
+            }
+        }
+        if !iv.is_empty() {
+            res.push((*i, *e, merge_spans(iv)));
+        }
+    }
+    res
+}
+
+/// The range an edge covers along its own axis.
+fn axis_span(e: &Edge) -> (i32, i32) {
+    if e.axis() == Axis::Horizontal {
+        (e.a.0.min(e.b.0), e.a.0.max(e.b.0))
+    } else {
+        (e.a.1.min(e.b.1), e.a.1.max(e.b.1))
+    }
+}
+
+/// The offset from `e` to the parallel edge `f`, positive along `e`'s outward normal.
+fn offset_across(e: &Edge, f: &Edge) -> i64 {
+    let oe = outward_edge(e);
+    if e.axis() == Axis::Horizontal {
+        i64::from(f.a.1 - e.a.1) * oe.1
+    } else {
+        i64::from(f.a.0 - e.a.0) * oe.0
+    }
+}
+
+/// Sorted spans with touching or overlapping ones joined.
+fn merge_spans(mut iv: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
+    iv.sort_unstable();
+    let mut m: Vec<(i32, i32)> = Vec::new();
+    for (lo, hi) in iv {
+        match m.last_mut() {
+            Some(l) if lo <= l.1 => l.1 = l.1.max(hi),
+            _ => m.push((lo, hi)),
+        }
+    }
+    m
+}
+
+/// Sandwiched wires. (1) the parts of the edges of `a` facing `b` outside, no more than `s` away;
+/// (2) of those, the parts facing another such part across `a` (inside, `w.0`..`w.1`), so both
+/// sides of the wire face `b`; (3) of those, the parts facing `a` outside again, `d.0`..`d.1`
+/// away. Every step side to side over a run of at least `run`, the measured parts merged per
+/// edge. One result per part of (3) and edge it faces.
+fn sandwiches(a: &Merged, b: &Merged, w: (i64, i64), s: i64, run: i64, d: (i64, i64)) -> Vec<Marker> {
+    let ea = a.edges();
+    let eb = b.edges();
+    let ia = RegionIndex::build(&ea.iter().map(bbox_edge).collect::<Vec<_>>());
+    let ib = RegionIndex::build(&eb.iter().map(bbox_edge).collect::<Vec<_>>());
+    let whole: Vec<EdgeParts> = ea.iter().enumerate().map(|(i, e)| (i, *e, vec![axis_span(e)])).collect();
+    let near_b = facing_parts(&whole, &eb, &ib, (1, s), run, true);
+    let part_of: BTreeMap<usize, &Vec<(i32, i32)>> = near_b.iter().map(|(i, _, p)| (*i, p)).collect();
+    // across the wire: a measured part against the measured parts of the facing edge
+    let mut sides = Vec::new();
+    for (i, e, parts) in &near_b {
+        let mut iv = Vec::new();
+        for j in ia.within(&bbox_edge(e), w.1 as i32 + 1, None) {
+            let f = &ea[j as usize];
+            let Some(fp) = part_of.get(&(j as usize)) else { continue };
+            if f.axis() != e.axis() || outward_edge(f) != (-outward_edge(e).0, -outward_edge(e).1) {
+                continue;
+            }
+            let gap = -offset_across(e, f);
+            if gap <= 0 || gap < w.0 || gap > w.1 {
+                continue;
+            }
+            for &(plo, phi) in parts {
+                for &(qlo, qhi) in fp.iter() {
+                    let (lo, hi) = (plo.max(qlo), phi.min(qhi));
+                    if hi > lo && i64::from(hi - lo) >= run {
+                        iv.push((lo, hi));
+                    }
+                }
+            }
+        }
+        if !iv.is_empty() {
+            sides.push((*i, *e, merge_spans(iv)));
+        }
+    }
+    // the sides facing `a` again, outside
+    let mut out = Vec::new();
+    for (i, e, parts) in &sides {
+        for j in ia.within(&bbox_edge(e), d.1 as i32 + 1, None) {
+            let f = &ea[j as usize];
+            if j as usize == *i || f.axis() != e.axis() || outward_edge(f) != (-outward_edge(e).0, -outward_edge(e).1) {
+                continue;
+            }
+            let gap = offset_across(e, f);
+            if gap <= 0 || gap < d.0 || gap > d.1 {
+                continue;
+            }
+            let (flo, fhi) = axis_span(f);
+            for &(plo, phi) in parts {
+                let (lo, hi) = (plo.max(flo), phi.min(fhi));
+                if hi > lo && i64::from(hi - lo) >= run {
+                    let at = |c: i32, on: &Edge| if on.axis() == Axis::Horizontal { (c, on.a.1) } else { (on.a.0, c) };
+                    let (p0, p1, q0, q1) = (at(lo, e), at(hi, e), at(lo, f), at(hi, f));
+                    out.push(Marker::Edges { a: [p0.0, p0.1, p1.0, p1.1], b: [q0.0, q0.1, q1.0, q1.1], value: gap });
+                }
+            }
         }
     }
     out
@@ -2087,6 +2237,70 @@ mod tests {
         assert_eq!(count(&r(37, 45, 25, 47), far), 1, "joint vertices touching on one line");
         assert!(parse("joint J 1/1 37 45 62 25").is_err(), "five values");
         assert!(parse("joint J 1/1 37 45 62 25 47 singular=vertex").is_err(), "no options");
+    }
+
+    #[test]
+    fn a_sandwiched_wire_facing_its_own_mask_again() {
+        // A (1/1) wire W 0..310 x 0..wt; B (1/2) under it (top at -bl) and over it (bottom at wt+bu);
+        // a further A wire G whose bottom is `g` over W's top
+        let case = |wt: i32, bl: Option<i32>, bu: i32, g: i32| {
+            let mut v = vec![bx(1, 1, 0, 0, 310, wt), bx(1, 2, 0, wt + bu, 310, wt + bu + 18), bx(1, 1, 0, wt + g, 310, wt + g + 21)];
+            if let Some(bl) = bl {
+                v.push(bx(1, 2, 0, -bl - 18, 310, -bl));
+            }
+            v
+        };
+        let r = "sandwich S 1/1 1/2 19 23 26 76 84 97";
+        assert_eq!(count(r, case(21, Some(25), 25, 90)), 1, "W 21 wide, B 25 off both sides, G 90 over");
+        assert_eq!(count(r, case(23, Some(25), 25, 90)), 1, "23 is within 19..23");
+        assert_eq!(count(r, case(19, Some(25), 25, 90)), 1, "19 is within 19..23");
+        assert_eq!(count(r, case(24, Some(25), 25, 90)), 0, "24 is not");
+        assert_eq!(count(r, case(18, Some(25), 25, 90)), 0, "18 is not");
+        assert_eq!(count(r, case(21, None, 25, 90)), 0, "B on one side only");
+        assert_eq!(count(r, case(21, Some(26), 25, 90)), 1, "26 is no more than 26");
+        assert_eq!(count(r, case(21, Some(27), 25, 90)), 0, "27 is more than 26");
+        assert_eq!(count(r, case(21, Some(25), 25, 97)), 1, "97 is within 84..97");
+        assert_eq!(count(r, case(21, Some(25), 25, 98)), 0, "98 is not");
+        assert_eq!(count(r, case(21, Some(25), 25, 84)), 1, "84 is within");
+        assert_eq!(count(r, case(21, Some(25), 25, 83)), 0, "83 is not");
+        // the lower B only 75 long: the run is short; 76 is enough
+        let mut short = case(21, None, 25, 90);
+        short.push(bx(1, 2, 0, -43, 75, -25));
+        assert_eq!(count(r, short), 0, "a run of 75");
+        let mut just = case(21, None, 25, 90);
+        just.push(bx(1, 2, 0, -43, 76, -25));
+        assert_eq!(count(r, just), 1, "a run of 76");
+        // B under W in two steps (0..125 at 25 off, 125..245 at 19 off) and over it only 85..165:
+        // across W each step shares less than the run with the B over it, the merged part more
+        let mut steps = vec![bx(1, 1, 0, 0, 310, 21), bx(1, 2, 85, 46, 165, 64), bx(1, 1, 0, 113, 310, 134)];
+        steps.extend([bx(1, 2, 0, -59, 125, -25), bx(1, 2, 125, -59, 245, -19)]);
+        assert_eq!(count(r, steps), 1, "the measured parts of one edge merge");
+        // each step of B under W runs only 60 and 65: a run is measured per pair, before any merge
+        let mut short_steps = vec![bx(1, 1, 0, 0, 310, 21), bx(1, 2, 0, 46, 310, 64), bx(1, 1, 0, 113, 310, 134)];
+        short_steps.extend([bx(1, 2, 0, -59, 60, -25), bx(1, 2, 60, -59, 125, -19)]);
+        assert_eq!(count(r, short_steps), 0, "runs of 60 and 65 are not one of 125");
+        // W's top in two steps (21 and 23 across), B under it only 45..165: across W each top step
+        // shares 60 with that part, again per pair; G under W
+        let split_top = vec![
+            bx(1, 1, 0, 0, 105, 21),
+            bx(1, 1, 105, 0, 310, 23),
+            bx(1, 2, 0, 46, 310, 64),
+            bx(1, 2, 45, -43, 165, -25),
+            bx(1, 1, 0, -113, 310, -92),
+        ];
+        assert_eq!(count(r, split_top), 0, "two widths of 60 run each");
+        // G under W, facing W's bottom through the lower B
+        let under = vec![bx(1, 1, 0, 0, 310, 21), bx(1, 2, 0, 46, 310, 64), bx(1, 2, 0, -43, 310, -25), bx(1, 1, 0, -113, 310, -92)];
+        assert_eq!(count(r, under), 1, "G 92 under W");
+        // G only 75 long over W, then 76
+        let mut g75 = case(21, Some(25), 25, 90);
+        g75[2] = bx(1, 1, 0, 113, 75, 134);
+        assert_eq!(count(r, g75), 0, "G shares 75");
+        let mut g76 = case(21, Some(25), 25, 90);
+        g76[2] = bx(1, 1, 0, 113, 76, 134);
+        assert_eq!(count(r, g76), 1, "G shares 76");
+        assert!(parse("sandwich S 1/1 1/2 23 19 26 76 84 97").is_err(), "an empty width range");
+        assert!(parse("sandwich S 1/1 1/2 19 23 26 76 84").is_err(), "seven values");
     }
 
     #[test]
